@@ -1,0 +1,1072 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: Autoscaling Vault
+
+
+Metadata: #####################################################################
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Network and Endpoint Configuration
+        Parameters:
+          - RemoteAccessCidrBlock
+          - PlatformNumber
+          - AvailabilityZones
+          - InternalDomain
+      - Label:
+          default: Vault Configuration
+        Parameters:
+          - VaultScheme
+          - VaultInternalName
+          - VaultPort
+          - VaultImage
+          - VaultKeyPair
+          - VaultTableMaxParallel
+          - VaultTableReadCapacity
+          - VaultTableWriteCapacity
+          - VaultRootTokenParameterSuffix
+          - VaultTransitTokenParameterSuffix
+    ParameterLabels:
+      RemoteAccessCidrBlock:
+        default: 'Remote Access Address Range'
+      PlatformNumber:
+        default: 'Platform Number'
+      AvailabilityZones:
+        default: 'Availability Zones'
+      InternalDomain:
+        default: 'Private Domain Name'
+      VaultScheme:
+        default: 'Vault URL Scheme'
+      VaultInternalName:
+        default: 'Vault Host Prefix'
+      VaultPort:
+        default: 'Vault Port Number'
+      VaultImage:
+        default: 'Vault Version'
+      VaultKeyPair:
+        default: 'Vault SSH Key'
+      VaultTableMaxParallel:
+        default: 'Storage: max concurrent requests'
+      VaultTableReadCapacity:
+        default: 'Storage: max reads per second'
+      VaultTableWriteCapacity:
+        default: 'Storage: max writes per second'
+      VaultRootTokenParameterSuffix:
+        default: 'Root Token Parameter Suffix'
+      VaultTransitTokenParameterSuffix:
+        default: 'Transit Token Parameter Suffix'
+# Metadata ####################################################################
+
+
+Parameters: ###################################################################
+  PlatformNumber:
+    Description: >-
+      The second octet of your new VPC /16 network. These should be unique
+      across all platforms. Non-unique platforms will not be routable from
+      common infrastructure.
+    Type: String
+    MaxLength: '3'
+    MinLength: '2'
+    AllowedPattern: '^[1-9][0-9]$|^1[0-9][0-9]$|2[0-4][0-9]$|^25[0-5]$'
+    Default: 69
+
+  AvailabilityZones:
+    Description: >-
+      List of availability zones available on the account in the target region.
+      Requires 3.
+    Type: 'List<AWS::EC2::AvailabilityZone::Name>'
+
+  InternalDomain:
+    Description: The internal/private domain.
+    Type: String
+    Default: internal
+
+  RemoteAccessCidrBlock:
+    Type: String
+    Default: 0.0.0.0/0
+
+  VaultScheme:
+    Description: HTTP or HTTPS?
+    Type: String
+    Default: 'http'
+    AllowedValues:
+      - http
+      - https
+
+  VaultInternalName:
+    Description: The host short name (aka minus domain suffix).
+    Type: String
+    Default: 'vault'
+
+  VaultPort:
+    Description: The port to send vault api requests to.
+    Type: String
+    Default: '8200'
+
+  VaultImage:
+    Type: String
+    Description: 'The Vault docker image version to use. Check latest here: https://hub.docker.com/_/vault/'
+    Default: 'vault:0.9.1'
+
+  VaultKeyPair:
+    Description: The name of the EC2 keypair to install on each vault node.
+    Type: 'AWS::EC2::KeyPair::KeyName'
+
+  VaultTableMaxParallel:
+    Type: String
+    Description: 'https://www.vaultproject.io/docs/configuration/storage/dynamodb.html#max_parallel'
+    Default: 128
+    AllowedPattern: ^[0-9]*$
+
+  VaultTableReadCapacity:
+    Type: String
+    Description: 'https://www.vaultproject.io/docs/configuration/storage/dynamodb.html#read_capacity'
+    Default: 5
+    AllowedPattern: ^[0-9]*$
+
+  VaultTableWriteCapacity:
+    Type: String
+    Description: 'https://www.vaultproject.io/docs/configuration/storage/dynamodb.html#write_capacity'
+    Default: 5
+    AllowedPattern: ^[0-9]*$
+
+  VaultSecretShareParameterSuffix:
+    Type: String
+    Description: Vault Root Token Parameter Suffix
+    Default: 'Vault/Unseal'
+
+  VaultRootTokenParameterSuffix:
+    Type: String
+    Description: Vault Root Token Parameter Suffix
+    Default: 'Vault/Token/Root'
+
+  VaultTransitTokenParameterSuffix:
+    Type: String
+    Description: Vault Transit Token Parameter Suffix
+    Default: 'Vault/Token/Transit'
+# Parameters ##################################################################
+
+
+Outputs: ######################################################################
+  VaultVpcId:
+    Description: >-
+      Use this ID as a parameter for a new stage stack. Provide this to spoke
+      environments.
+    Value: !Ref Vpc
+
+  VaultPlatformNumber:
+    Description: >-
+      This management stack's platform number. Provide this to spoke
+      environments.
+    Value: !Ref PlatformNumber
+
+  VaultURL:
+    Description: The Vault URL
+    Value: !Sub '${VaultScheme}://${VaultInternalName}.${InternalDomain}:${VaultPort}'
+
+  VaultLoadBalancerDnsName:
+    Description: The FQDN of the internal Vault load-balancer
+    Value: !GetAtt
+      - VaultInternalLoadBalancer
+      - DNSName
+
+  VaultRootTokenParameter:
+    Description: Parameter name of the Vault Root Token
+    Value: !Sub '/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
+
+  VaultTransitTokenParameter:
+    Description: Parameter name of the Vault Transit Token
+    Value: !Sub '/${AWS::StackName}/${VaultTransitTokenParameterSuffix}'
+
+  VaultSecretShareParameter:
+    Value: !GetAtt VaultInit.SecretShareParameter
+
+  VaultRootTokenParameter:
+    Value: !GetAtt VaultInit.RootTokenParameter
+# Outputs #####################################################################
+
+
+# Conditions: ###################################################################
+# # Conditions ##################################################################
+
+
+Mappings: #####################################################################
+  RancherByRegion:
+    #Rancher v1.1.0 AMI's
+    ap-south-1:
+      AMI: ami-7145011e
+    eu-west-2:
+      AMI: ami-2dc0d049
+    eu-west-1:
+      AMI: ami-6b2cd712
+    ap-northeast-2:
+      AMI: ami-c2568eac
+    ap-northeast-1:
+      AMI: ami-14d72f72
+    sa-east-1:
+      AMI: ami-88087be4
+    ca-central-1:
+      AMI: ami-0f3a846b
+    ap-southeast-1:
+      AMI: ami-4866042b
+    ap-southeast-2:
+      AMI: ami-74aeb417
+    eu-central-1:
+      AMI: ami-1c339973
+    us-east-1:
+      AMI: ami-22cec059
+    us-east-2:
+      AMI: ami-efd4f78a
+    us-west-1:
+      AMI: ami-964175f6
+    us-west-2:
+      AMI: ami-9515feed
+# Mappings ####################################################################
+
+
+Resources: ####################################################################
+  Vpc:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      EnableDnsHostnames: 'true'
+      EnableDnsSupport: 'true'
+      CidrBlock: !Sub '10.${PlatformNumber}.0.0/16'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VPC'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  InternalZone:
+    Type: 'AWS::Route53::HostedZone'
+    Properties:
+      HostedZoneConfig:
+        Comment: !Sub '${AWS::StackName} ${InternalDomain}'
+      Name: !Ref InternalDomain
+      VPCs:
+        - VPCId: !Ref Vpc
+          VPCRegion: !Ref 'AWS::Region'
+      HostedZoneTags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-InternalZone'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    DependsOn:
+      - Vpc
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-IG'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  GatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    DependsOn:
+      - InternetGateway
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  NatGateway1:
+    Type: 'AWS::EC2::NatGateway'
+    DependsOn:
+      - NatGatewayEip1
+      - PublicAssociation1
+    Properties:
+      AllocationId: !GetAtt 
+        - NatGatewayEip1
+        - AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  NatGatewayEip1:
+    Type: 'AWS::EC2::EIP'
+    DependsOn:
+      - GatewayAttachment
+    Properties:
+      Domain: vpc
+
+  PublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    DependsOn:
+      - GatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-RoutesForPublic'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  RouteToInternetFromPublic:
+    Type: 'AWS::EC2::Route'
+    DependsOn:
+      - GatewayAttachment
+      - PublicRouteTable
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select 
+        - '0'
+        - !Ref AvailabilityZones
+      CidrBlock: !Sub '10.${PlatformNumber}.160.0/20'
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicSubnet1'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: PeerRange
+          Value: !Sub '10.${PlatformNumber}.160.0 through 10.${PlatformNumber}.255.255'
+        - Key: CIDR
+          Value: !Sub '10.${PlatformNumber}.160.0/20'
+        - Key: AvailabilityZone
+          Value: !Select 
+            - '0'
+            - !Ref AvailabilityZones
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  PublicSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select 
+        - '1'
+        - !Ref AvailabilityZones
+      CidrBlock: !Sub '10.${PlatformNumber}.176.0/20'
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicSubnet2'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: PeerRange
+          Value: !Sub '10.${PlatformNumber}.160.0 through 10.${PlatformNumber}.255.255'
+        - Key: CIDR
+          Value: !Sub '10.${PlatformNumber}.176.0/20'
+        - Key: AvailabilityZone
+          Value: !Select 
+            - '1'
+            - !Ref AvailabilityZones
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  PublicSubnet3:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select 
+        - '2'
+        - !Ref AvailabilityZones
+      CidrBlock: !Sub '10.${PlatformNumber}.192.0/20'
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicSubnet3'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: PeerRange
+          Value: !Sub '10.${PlatformNumber}.160.0 through 10.${PlatformNumber}.255.255'
+        - Key: CIDR
+          Value: !Sub '10.${PlatformNumber}.192.0/20'
+        - Key: AvailabilityZone
+          Value: !Select 
+            - '2'
+            - !Ref AvailabilityZones
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  PublicAssociation1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn:
+      - PublicRouteTable
+      - PublicSubnet1
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicAssociation2:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn:
+      - PublicRouteTable
+      - PublicSubnet2
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PublicAssociation3:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn:
+      - PublicRouteTable
+      - PublicSubnet3
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet3
+
+  PrivateRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    DependsOn:
+      - GatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - '-'
+            - - !Sub '${AWS::StackName}-RoutesForPrivate'
+              - !Select
+                - '0'
+                - !Ref AvailabilityZones
+              - !Select 
+                - '1'
+                - !Ref AvailabilityZones
+              - !Select 
+                - '2'
+                - !Ref AvailabilityZones
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  RouteToInternetFromPrivate1:
+    Type: 'AWS::EC2::Route'
+    DependsOn:
+      - NatGateway1
+      - PrivateRouteTable
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select 
+        - '0'
+        - !Ref AvailabilityZones
+      CidrBlock: !Sub '10.${PlatformNumber}.64.0/20'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PrivateSubnet1'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: PeerRange
+          Value: !Sub '10.${PlatformNumber}.64.0 through 10.${PlatformNumber}.159.255'
+        - Key: CIDR
+          Value: !Sub '10.${PlatformNumber}.64.0/20'
+        - Key: AvailabilityZone
+          Value: !Select 
+            - '0'
+            - !Ref AvailabilityZones
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  PrivateSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select 
+        - '1'
+        - !Ref AvailabilityZones
+      CidrBlock: !Sub '10.${PlatformNumber}.80.0/20'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PrivateSubnet2'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: PeerRange
+          Value: !Sub '10.${PlatformNumber}.64.0 through 10.${PlatformNumber}.159.255'
+        - Key: CIDR
+          Value: !Sub '10.${PlatformNumber}.80.0/20'
+        - Key: AvailabilityZone
+          Value: !Select 
+            - '1'
+            - !Ref AvailabilityZones
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  PrivateSubnet3:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select 
+        - '2'
+        - !Ref AvailabilityZones
+      CidrBlock: !Sub '10.${PlatformNumber}.96.0/20'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PrivateSubnet3'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: PeerRange
+          Value: !Sub '10.${PlatformNumber}.64.0 through 10.${PlatformNumber}.159.255'
+        - Key: CIDR
+          Value: !Sub '10.${PlatformNumber}.96.0/20'
+        - Key: AvailabilityZone
+          Value: !Select 
+            - '2'
+            - !Ref AvailabilityZones
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  PrivateAssociation1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn:
+      - PrivateRouteTable
+      - PrivateSubnet1
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateAssociation2:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn:
+      - PrivateRouteTable
+      - PrivateSubnet2
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  PrivateAssociation3:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn:
+      - PrivateRouteTable
+      - PrivateSubnet3
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet3
+
+  VaultInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub 'ec2.${AWS::URLSuffix}'
+
+  VaultInstancePermissions:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:DescribeTable
+              - dynamodb:CreateTable
+              - dynamodb:GetItem
+              - dynamodb:Query
+              - dynamodb:QueryPages
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:BatchWriteItem
+            Resource: !GetAtt VaultStorageBackend.Arn
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:ListMetrics
+            Resource:
+              - '*'
+      PolicyName: Vault-Instance-Permissions
+      Roles:
+        - !Ref VaultInstanceRole
+
+  VaultInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref VaultInstanceRole
+
+  VaultLoadBalancerGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: Internal ELB instances attached only to a private subnet.
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VaultLoadBalancerGroup'
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  # Allows outbound communication to Vault Servers
+  VaultLoadBalancerGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref VaultLoadBalancerGroup
+      DestinationSecurityGroupId: !Ref VaultRemoteAccessGroup
+      IpProtocol: tcp
+      FromPort: '1024'
+      ToPort: '65535'
+
+  # Allows communication from Rancher servers
+  VaultLoadBalancerGroupIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref VaultLoadBalancerGroup
+      CidrIp: !GetAtt Vpc.CidrBlock
+      FromPort: !Ref VaultPort
+      ToPort: !Ref VaultPort
+      IpProtocol: tcp
+
+  # Allows communication from the remote access control plane
+  VaultLoadBalancerGroupIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref VaultLoadBalancerGroup
+      CidrIp: !Ref RemoteAccessCidrBlock
+      FromPort: !Ref VaultPort
+      ToPort: !Ref VaultPort
+      IpProtocol: tcp
+
+  VaultRemoteAccessGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enables remote access from DevOps VPC
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        # Allows Rancher OS to pull vault image
+        - CidrIp: 0.0.0.0/0
+          FromPort: '80'
+          ToPort: '80'
+          IpProtocol: tcp
+        # Allows Rancher OS to pull vault image
+        - CidrIp: 0.0.0.0/0
+          FromPort: '443'
+          ToPort: '443'
+          IpProtocol: tcp
+      SecurityGroupIngress:
+        # Allows communication between the Vault Servers and the Private LB
+        - SourceSecurityGroupId: !Ref VaultLoadBalancerGroup
+          IpProtocol: tcp
+          FromPort: !Ref VaultPort
+          ToPort: !Ref VaultPort
+        - CidrIp: !Ref RemoteAccessCidrBlock
+          IpProtocol: tcp
+          FromPort: !Ref VaultPort
+          ToPort: !Ref VaultPort
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VaultRemoteAccessGroup'
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  VaultInternalTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 5
+      HealthCheckPath: /v1/sys/health
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 2
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200'
+      Port: !Ref VaultPort
+      Protocol: HTTP
+      VpcId: !Ref Vpc
+
+  VaultInternalLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      SecurityGroups:
+        - !Ref VaultLoadBalancerGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+        - !Ref PublicSubnet3
+
+  VaultInternalListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref VaultInternalLoadBalancer
+      Port: !Ref VaultPort
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref VaultInternalTargetGroup
+
+  VaultInternalAlias:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref InternalZone
+      Comment: Vault alias targeted to VaultInternalLoadBalancer.
+      RecordSets:
+      - Name: !Sub '${VaultInternalName}.${InternalDomain}.'
+        Type: A
+        AliasTarget:
+          HostedZoneId: !GetAtt
+            - VaultInternalLoadBalancer
+            - CanonicalHostedZoneID
+          DNSName: !GetAtt
+            - VaultInternalLoadBalancer
+            - DNSName
+
+  VaultLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !FindInMap [RancherByRegion, !Ref 'AWS::Region', AMI]
+      InstanceType: t2.medium
+      SecurityGroups:
+        - !Ref VaultRemoteAccessGroup
+        - !GetAtt Vpc.DefaultSecurityGroup
+      KeyName: !Ref VaultKeyPair
+      InstanceMonitoring: true
+      IamInstanceProfile: !Ref VaultInstanceProfile
+      EbsOptimized: false
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #cloud-config
+            write_files:
+              - path: /opt/vault/config/vault.hcl
+                permissions: "0644"
+                content: |
+                  storage "dynamodb" {
+                    region = "${AWS::Region}"
+                    table = "${VaultStorageBackend}"
+                    ha_enabled = "true"
+                    max_parallel = "${VaultTableMaxParallel}"
+                    read_capacity = "${VaultTableReadCapacity}"
+                    write_capacity = "${VaultTableWriteCapacity}"
+                  }
+                  listener "tcp" {
+                    address = "0.0.0.0:${VaultPort}"
+                    tls_disable = 1
+                    tls_cert_file = "/vault/config/tls/certificate.pem"
+                    tls_key_file = "/vault/config/tls/private-key.pem"
+                    tls_min_version = "tls12"
+                    tls_prefer_server_cipher_suites = "true"
+                  }
+            runcmd:
+              - ros config set rancher.environment.AWS_INSTANCE_ID $(wget -qO- http://169.254.169.254/latest/meta-data/instance-id)
+              - ros config set rancher.environment.AWS_LOCAL_IPV4 $(wget -qO- http://169.254.169.254/latest/meta-data/local-ipv4)
+            rancher:
+              services:
+                vault:
+                  image: ${VaultImage}
+                  hostname: ${VaultInternalName}.${InternalDomain}
+                  restart: unless-stopped
+                  environment:
+                    - VAULT_ADDR=${VaultScheme}://127.0.0.1:${VaultPort}
+                    - VAULT_REDIRECT_ADDR=${VaultScheme}://${VaultInternalName}.${InternalDomain}:${VaultPort}
+                    - VAULT_TLS_SERVER_NAME=${VaultInternalName}.${InternalDomain}
+                  cap_add:
+                    - IPC_LOCK
+                  ports:
+                    - "${VaultPort}:${VaultPort}"
+                  volumes:
+                    - /opt/vault/config:/vault/config
+                  command: server
+                vault-signal-asg:
+                  image: dweomer/awscfn
+                  command: cfn-signal --success true --region ${AWS::Region} --stack ${AWS::StackName} --resource VaultAutoscalingGroup
+                  depends_on:
+                    - vault
+                  restart: on-failure
+
+  VaultTopic:
+    Type: AWS::SNS::Topic
+
+  VaultStorageBackend:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: 'Path'
+          AttributeType: 'S'
+        - AttributeName: 'Key'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: "Path"
+          KeyType: "HASH"
+        - AttributeName: "Key"
+          KeyType: "RANGE"
+      ProvisionedThroughput:
+        ReadCapacityUnits: !Ref VaultTableReadCapacity
+        WriteCapacityUnits: !Ref VaultTableWriteCapacity
+
+  VaultAutoscalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - RouteToInternetFromPrivate1
+      - RouteToInternetFromPublic
+      - VaultInternalAlias
+    CreationPolicy:
+      AutoScalingCreationPolicy:
+        MinSuccessfulInstancesPercent: 100
+      ResourceSignal:
+        Count: 2
+        Timeout: PT5M
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        MinInstancesInService: 1
+        MinSuccessfulInstancesPercent: 100
+        PauseTime: PT5M
+        WaitOnResourceSignals: true
+    Properties:
+      DesiredCapacity: 2
+      MaxSize: 2
+      MinSize: 2
+      TargetGroupARNs:
+        - !Ref VaultInternalTargetGroup
+      HealthCheckGracePeriod: 300
+      HealthCheckType: EC2
+      LaunchConfigurationName: !Ref VaultLaunchConfiguration
+      MetricsCollection:
+        - Granularity: 1Minute
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+        - !Ref PublicSubnet3
+      NotificationConfigurations:
+        - TopicARN: !Ref 'VaultTopic'
+          NotificationTypes:
+            - autoscaling:EC2_INSTANCE_LAUNCH
+            - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+            - autoscaling:EC2_INSTANCE_TERMINATE
+            - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VaultServer'
+          PropagateAtLaunch: 'true'
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+          PropagateAtLaunch: 'true'
+
+  VaultRootTokenDecryptionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+            - sts:AssumeRole
+          Principal:
+            AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+
+  VaultRootTokenDecryptionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: VaultRootTokenViewer
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+              - ssm:DescribeParameters
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${VaultInit.RootTokenParameter}'
+      Roles:
+        - !Ref VaultRootTokenDecryptionRole
+
+  VaultRootTokenEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal: 
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Effect: "Allow"
+            Principal: 
+              AWS: !GetAtt VaultResourceRole.Arn
+            Action:
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+          - Effect: "Allow"
+            Principal: 
+              AWS: !GetAtt VaultRootTokenDecryptionRole.Arn
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: "*"
+
+  VaultSecretShareDecryptionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+            - sts:AssumeRole
+          Principal: 
+            AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+
+  VaultSecretShareDecryptionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: VaultSecretShareViewer
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+              - ssm:DescribeParameters
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${VaultInit.SecretShareParameter}'
+      Roles:
+        - !Ref VaultSecretShareDecryptionRole
+
+  VaultSecretShareEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal: 
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Effect: "Allow"
+            Principal: 
+              AWS: !GetAtt VaultResourceRole.Arn
+            Action:
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+          - Effect: "Allow"
+            Principal: 
+              AWS: !GetAtt VaultSecretShareDecryptionRole.Arn
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: "*"
+
+  VaultResourcePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:PutParameter
+              - ssm:DescribeParameters
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/*'
+          - Effect: Allow
+            Action:
+              - ec2:Describe*
+              - autoscaling:Describe*
+            Resource: '*'
+
+  VaultResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+            - sts:AssumeRole
+          Principal:
+            Service:
+              - !Sub 'lambda.${AWS::URLSuffix}'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - !Ref VaultResourcePolicy
+        
+  VaultResourceFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - RouteToInternetFromPublic
+      - RouteToInternetFromPrivate1
+      - PrivateAssociation1
+      - PrivateAssociation2
+      - PrivateAssociation3
+    Properties:
+      CodeUri: vault-test.zip
+      Environment:
+        Variables:
+          'VAULT_ADDR': !Sub '${VaultScheme}://${VaultInternalName}.${InternalDomain}:${VaultPort}'
+      Handler: handler.Handle
+      Role: !GetAtt VaultResourceRole.Arn
+      Runtime: python2.7
+      Timeout: 60 #seconds
+      VpcConfig:
+        SecurityGroupIds:
+          - !GetAtt Vpc.DefaultSecurityGroup
+          - !Ref VaultRemoteAccessGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+          - !Ref PrivateSubnet3
+
+  VaultInit:
+    Type: Custom::VaultInit
+    DependsOn:
+      - VaultAutoscalingGroup
+      - VaultResourceFunction
+      - VaultResourcePolicy
+      - VaultResourceRole
+    Properties: # strings only, please
+      ServiceToken: !GetAtt VaultResourceFunction.Arn
+      VaultScheme: !Ref VaultScheme
+      VaultGroup: !Ref VaultAutoscalingGroup
+      VaultPort: !Ref VaultPort
+      VaultRootTokenEncryptionKey: !Ref VaultRootTokenEncryptionKey
+      VaultSecretShareEncryptionKey: !Ref VaultSecretShareEncryptionKey
+# Resources ###################################################################
