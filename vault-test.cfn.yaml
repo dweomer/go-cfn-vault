@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
-Description: Autoscaling Vault
+Description: Auto-scaling, auto-initializing, HA Vault
 
 
 Metadata: #####################################################################
@@ -150,16 +150,10 @@ Parameters: ###################################################################
 
 Outputs: ######################################################################
   VaultVpcId:
-    Description: >-
-      Use this ID as a parameter for a new stage stack. Provide this to spoke
-      environments.
     Value: !Ref Vpc
 
-  VaultPlatformNumber:
-    Description: >-
-      This management stack's platform number. Provide this to spoke
-      environments.
-    Value: !Ref PlatformNumber
+  VaultVpcCidrBlock:
+    Value: !GetAtt Vpc.CidrBlock
 
   VaultURL:
     Description: The Vault URL
@@ -170,10 +164,6 @@ Outputs: ######################################################################
     Value: !GetAtt
       - VaultInternalLoadBalancer
       - DNSName
-
-  VaultRootTokenParameter:
-    Description: Parameter name of the Vault Root Token
-    Value: !Sub '/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
 
   VaultTransitTokenParameter:
     Description: Parameter name of the Vault Transit Token
@@ -862,32 +852,11 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
           PropagateAtLaunch: 'true'
 
-  VaultRootTokenDecryptionRole:
-    Type: AWS::IAM::Role
+  VaultRootTokenEncryptionAlias:
+    Type: AWS::KMS::Alias
     Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-        - Effect: Allow
-          Action:
-            - sts:AssumeRole
-          Principal:
-            AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
-
-  VaultRootTokenDecryptionPolicy:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyName: VaultRootTokenViewer
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Action:
-              - ssm:GetParameter*
-              - ssm:DescribeParameters
-            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${VaultInit.RootTokenParameter}'
-      Roles:
-        - !Ref VaultRootTokenDecryptionRole
+      AliasName: !Sub 'alias/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
+      TargetKeyId: !Ref VaultRootTokenEncryptionKey
 
   VaultRootTokenEncryptionKey:
     Type: AWS::KMS::Key
@@ -896,65 +865,55 @@ Resources: ####################################################################
         Version: "2012-10-17"
         Statement: 
           - Effect: "Allow"
-            Principal: 
+            Principal:
               AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
             Action:
-              - kms:Create*
-              - kms:Describe*
-              - kms:Enable*
-              - kms:List*
-              - kms:Put*
-              - kms:Update*
-              - kms:Revoke*
-              - kms:Disable*
-              - kms:Get*
-              - kms:Delete*
-              - kms:ScheduleKeyDeletion
-              - kms:CancelKeyDeletion
-            Resource: "*"
-          - Effect: "Allow"
-            Principal: 
-              AWS: !GetAtt VaultResourceRole.Arn
-            Action:
-              - kms:Encrypt
-              - kms:ReEncrypt*
-              - kms:GenerateDataKey*
-              - kms:DescribeKey
-            Resource: "*"
-          - Effect: "Allow"
-            Principal: 
-              AWS: !GetAtt VaultRootTokenDecryptionRole.Arn
-            Action:
-              - kms:Decrypt
-              - kms:DescribeKey
+              - kms:* # see http://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html#key-policy-default-allow-root-enable-iam
             Resource: "*"
 
-  VaultSecretShareDecryptionRole:
-    Type: AWS::IAM::Role
+  VaultRootTokenParameterReaderPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DependsOn:
+      - VaultRootTokenEncryptionKey
     Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-        - Effect: Allow
-          Action:
-            - sts:AssumeRole
-          Principal: 
-            AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
-
-  VaultSecretShareDecryptionPolicy:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyName: VaultSecretShareViewer
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Action:
               - ssm:GetParameter*
-              - ssm:DescribeParameters
-            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${VaultInit.SecretShareParameter}'
-      Roles:
-        - !Ref VaultSecretShareDecryptionRole
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}'
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: !GetAtt VaultRootTokenEncryptionKey.Arn
+
+  VaultRootTokenParameterWriterPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DependsOn:
+      - VaultRootTokenEncryptionKey
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:PutParameter*
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}'
+          - Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: !GetAtt VaultRootTokenEncryptionKey.Arn
+
+  VaultSecretShareEncryptionAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}/${VaultSecretShareParameterSuffix}'
+      TargetKeyId: !Ref VaultSecretShareEncryptionKey
 
   VaultSecretShareEncryptionKey:
     Type: AWS::KMS::Key
@@ -963,55 +922,65 @@ Resources: ####################################################################
         Version: "2012-10-17"
         Statement: 
           - Effect: "Allow"
-            Principal: 
+            Principal:
               AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
             Action:
-              - kms:Create*
-              - kms:Describe*
-              - kms:Enable*
-              - kms:List*
-              - kms:Put*
-              - kms:Update*
-              - kms:Revoke*
-              - kms:Disable*
-              - kms:Get*
-              - kms:Delete*
-              - kms:ScheduleKeyDeletion
-              - kms:CancelKeyDeletion
-            Resource: "*"
-          - Effect: "Allow"
-            Principal: 
-              AWS: !GetAtt VaultResourceRole.Arn
-            Action:
-              - kms:Encrypt
-              - kms:ReEncrypt*
-              - kms:GenerateDataKey*
-              - kms:DescribeKey
-            Resource: "*"
-          - Effect: "Allow"
-            Principal: 
-              AWS: !GetAtt VaultSecretShareDecryptionRole.Arn
-            Action:
-              - kms:Decrypt
-              - kms:DescribeKey
+              - kms:* # see http://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html#key-policy-default-allow-root-enable-iam
             Resource: "*"
 
-  VaultResourcePolicy:
+  VaultSecretShareParameterReaderPolicy:
     Type: AWS::IAM::ManagedPolicy
+    DependsOn:
+      - VaultSecretShareEncryptionKey
     Properties:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Action:
-              - ssm:PutParameter
-              - ssm:DescribeParameters
+              - ssm:GetParameter*
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}'
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: !GetAtt VaultSecretShareEncryptionKey.Arn
+
+  VaultSecretShareParameterWriterPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DependsOn:
+      - VaultSecretShareEncryptionKey
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:PutParameter*
             Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/*'
           - Effect: Allow
             Action:
-              - ec2:Describe*
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: !GetAtt VaultSecretShareEncryptionKey.Arn
+
+  VaultResourcePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
               - autoscaling:Describe*
+              - ec2:Describe*
+              - ssm:DescribeParameters
             Resource: '*'
+      PolicyName: !Sub '${AWS::StackName}-Vault-Resource-Additional-Permissions'
+      Roles:
+        - !Ref VaultResourceRole
 
   VaultResourceRole:
     Type: AWS::IAM::Role
@@ -1027,8 +996,9 @@ Resources: ####################################################################
               - !Sub 'lambda.${AWS::URLSuffix}'
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
-        - !Ref VaultResourcePolicy
-        
+        - !Ref VaultRootTokenParameterWriterPolicy
+        - !Ref VaultSecretShareParameterWriterPolicy
+
   VaultResourceFunction:
     Type: AWS::Serverless::Function
     DependsOn:
@@ -1062,11 +1032,14 @@ Resources: ####################################################################
       - VaultResourceFunction
       - VaultResourcePolicy
       - VaultResourceRole
-    Properties: # strings only, please
+    Properties:
       ServiceToken: !GetAtt VaultResourceFunction.Arn
-      VaultScheme: !Ref VaultScheme
-      VaultGroup: !Ref VaultAutoscalingGroup
-      VaultPort: !Ref VaultPort
-      VaultRootTokenEncryptionKey: !Ref VaultRootTokenEncryptionKey
-      VaultSecretShareEncryptionKey: !Ref VaultSecretShareEncryptionKey
+      ServerScheme: !Ref VaultScheme
+      ServerGroup: !Ref VaultAutoscalingGroup
+      ServerPort: !Ref VaultPort
+      ShouldUnseal: 'true'
+      RootTokenEncryptionKey: !Ref VaultRootTokenEncryptionAlias
+      RootTokenParameterSuffix: !Ref VaultRootTokenParameterSuffix
+      SecretShareEncryptionKey: !Ref VaultSecretShareEncryptionAlias
+      SecretShareParameterSuffix: !Ref VaultSecretShareParameterSuffix
 # Resources ###################################################################

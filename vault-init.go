@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,16 +23,24 @@ func init() {
 	customres.Register("VaultInit", new(VaultInit))
 }
 
-// VaultInit represents `vault init` CloudFormation resource.
-type VaultInit struct{}
+const (
+	defaultScheme = "http"
+	defaultPort   = "8200"
+)
 
-// VaultInitProperties encapsulates the Properties specified on the custom resource.
-type VaultInitProperties struct {
-	VaultScheme                   string `json:"VaultScheme"`
-	VaultGroup                    string `json:"VaultGroup"`
-	VaultPort                     string `json:"VaultPort"`
-	VaultRootTokenEncryptionKey   string `json:"VaultRootTokenEncryptionKey"`
-	VaultSecretShareEncryptionKey string `json:"VaultSecretShareEncryptionKey"`
+// VaultInit represents `vault init` CloudFormation resource.
+type VaultInit struct {
+	ServerScheme string `json:",omitempty"`
+	ServerGroup  string `json:",omitempty"`
+	ServerPort   string `json:",omitempty"`
+
+	RootTokenEncryptionKey   string `json:",omitempty"`
+	RootTokenParameterSuffix string `json:",omitempty"`
+
+	SecretShareEncryptionKey   string `json:",omitempty"`
+	SecretShareParameterSuffix string `json:",omitempty"`
+
+	ShouldUnseal string `json:",omitempty"`
 }
 
 // Create is invoked when the resource is created.
@@ -43,65 +52,51 @@ func (r *VaultInit) Create(evt *cloudformation.Event, ctx *runtime.Context) (str
 
 // Update is invoked when the resource is updated.
 func (r *VaultInit) Update(evt *cloudformation.Event, ctx *runtime.Context) (string, interface{}, error) {
-	var (
-		vscheme   = "http"
-		vgroup    string
-		vhost     string
-		vport     = "8200"
-		venctoken string
-		vencshare string
-	)
-
 	aws := session.Must(session.NewSession())
 	rid := evt.PhysicalResourceID
 
-	p := map[string]string{}
-	if err := json.Unmarshal(evt.ResourceProperties, &p); err != nil {
+	if err := json.Unmarshal(evt.ResourceProperties, r); err != nil {
 		return rid, nil, err
 	}
 
-	if v, ok := p["VaultGroup"]; ok {
-		vgroup = v
-	}
-	if vgroup == "" {
-		return rid, nil, errors.New("missing required resource property `VaultGroup`")
+	if r.ServerScheme == "" {
+		r.ServerScheme = defaultScheme
 	}
 
-	if v, ok := p["VaultScheme"]; ok {
-		vscheme = v
+	if r.ServerGroup == "" {
+		return rid, nil, errors.New("missing required resource property `ServerGroup`")
 	}
 
-	if v, ok := p["VaultPort"]; ok {
-		vport = v
+	if r.ServerPort == "" {
+		r.ServerScheme = defaultPort
 	}
 
-	if v, ok := p["VaultRootTokenEncryptionKey"]; ok {
-		venctoken = v
+	if r.RootTokenParameterSuffix == "" {
+		r.RootTokenParameterSuffix = "Vault/Token/Root"
 	}
 
-	if v, ok := p["VaultSecretShareEncryptionKey"]; ok {
-		vencshare = v
+	if r.SecretShareParameterSuffix == "" {
+		r.SecretShareParameterSuffix = "Vault/Unseal/0"
 	}
 
-	vhost, err := instancePrivateIP(aws, vgroup)
+	vipaddr, err := listInstanceAddressesInGroup(aws, r.ServerGroup)
 	if err != nil {
 		return rid, nil, err
+	}
+	if len(vipaddr) == 0 {
+		return rid, nil, fmt.Errorf("no suitable instances found in `%s`", r.ServerGroup)
 	}
 
 	vconfig := vault.DefaultConfig()
 	if err := vconfig.ReadEnvironment(); err != nil {
 		return rid, nil, err
 	}
-	vconfig.Address = fmt.Sprintf("%s://%s:%s", vscheme, vhost, vport)
+	vconfig.Address = fmt.Sprintf("%s://%s:%s", r.ServerScheme, vipaddr[0], r.ServerPort)
 
 	vclient, err := vault.NewClient(vconfig)
 	if err != nil {
 		return rid, nil, err
 	}
-
-	stcknm := strings.Split(evt.StackID, "/")[1]
-	ssname := fmt.Sprintf("/%s/%s/Secret/0", stcknm, rid)
-	rtname := fmt.Sprintf("/%s/%s/Token/Root", stcknm, rid)
 
 	vhealth, err := vclient.Sys().Health()
 	for i := 0; err != nil && i < 10; i++ {
@@ -113,48 +108,57 @@ func (r *VaultInit) Update(evt *cloudformation.Event, ctx *runtime.Context) (str
 		return rid, nil, err
 	}
 
-	if vhealth.Initialized {
-		return rid, map[string]string{
-			"SecretShareParameter": ssname,
-			"RootTokenParameter":   rtname,
-		}, nil
-	}
+	stcknm := strings.Split(evt.StackID, "/")[1]
+	ssname := fmt.Sprintf("/%s/%s", stcknm, r.SecretShareParameterSuffix)
+	rtname := fmt.Sprintf("/%s/%s", stcknm, r.RootTokenParameterSuffix)
 
-	vinitreq := vault.InitRequest{
-		SecretShares:    1,
-		SecretThreshold: 1,
-	}
-
-	log.Printf("VaultInit Request: %+v", vinitreq)
-	vinitres, err := vclient.Sys().Init(&vinitreq)
-	// DO NOT LOG THE RESPONSE
-	if err != nil {
-		log.Printf("VaultInit Error: %s", err)
-		return rid, nil, err
-	}
-
-	ssopts := &parameterOptions{
-		Description:   "Vault Unseal Key",
-		EncryptionKey: vencshare,
-	}
-	if _, err = ssmPutParameter(aws, ssopts, ssname, vinitres.Keys[0]); err != nil {
-		log.Printf("PutParameter Error: %s", err)
-		return rid, nil, err
-	}
-
-	rtopts := &parameterOptions{
-		Description:   "Vault Root Token",
-		EncryptionKey: venctoken,
-	}
-	if _, err = ssmPutParameter(aws, rtopts, rtname, vinitres.RootToken); err != nil {
-		log.Printf("PutParameter Error: %s", err)
-		return rid, nil, err
-	}
-
-	return rid, map[string]string{
+	response := map[string]string{
 		"SecretShareParameter": ssname,
 		"RootTokenParameter":   rtname,
-	}, nil
+	}
+
+	if !vhealth.Initialized {
+		vinitreq := vault.InitRequest{
+			SecretShares:    1,
+			SecretThreshold: 1,
+		}
+
+		log.Printf("VaultInit Request: %+v", vinitreq)
+		vinitres, err := vclient.Sys().Init(&vinitreq)
+		// DO NOT LOG THE RESPONSE
+		if err != nil {
+			log.Printf("VaultInit Error: %s", err)
+			return rid, nil, err
+		}
+
+		ssopts := &parameterOptions{
+			Description:   "Vault Unseal Key",
+			EncryptionKey: r.SecretShareEncryptionKey,
+		}
+		if _, err = ssmPutParameter(aws, ssopts, ssname, vinitres.Keys[0]); err != nil {
+			log.Printf("PutParameter Error: %s", err)
+			return rid, nil, err
+		}
+
+		rtopts := &parameterOptions{
+			Description:   "Vault Root Token",
+			EncryptionKey: r.RootTokenEncryptionKey,
+		}
+		if _, err = ssmPutParameter(aws, rtopts, rtname, vinitres.RootToken); err != nil {
+			log.Printf("PutParameter Error: %s", err)
+			return rid, nil, err
+		}
+
+		if unseal, err := strconv.ParseBool(r.ShouldUnseal); vhealth.Sealed && unseal && err == nil {
+			vss, err := vclient.Sys().Unseal(vinitres.Keys[0])
+			if err != nil {
+				log.Printf("Vault Unseal Error: %s", err)
+			}
+			log.Printf("Vault Seal Status: %+v", vss)
+		}
+	}
+
+	return rid, response, nil
 }
 
 // Delete is invoked when the resource is deleted.
@@ -162,38 +166,50 @@ func (r *VaultInit) Delete(*cloudformation.Event, *runtime.Context) error {
 	return nil
 }
 
-func instancePrivateIP(ses *session.Session, group string) (string, error) {
+func listInstanceAddressesInGroup(ses *session.Session, group string) ([]string, error) {
 	autoscalingClient := autoscaling.New(ses)
 	ec2Client := ec2.New(ses)
+
+	iad := []string{}
 
 	dgi := &autoscaling.DescribeAutoScalingGroupsInput{
 		AutoScalingGroupNames: []*string{&group},
 	}
 	dgo, err := autoscalingClient.DescribeAutoScalingGroups(dgi)
 	if err != nil {
-		return "", err
+		return iad, err
 	}
 	if len(dgo.AutoScalingGroups) == 0 {
-		return "", fmt.Errorf("autoscaling group `%s` not found", group)
+		return iad, fmt.Errorf("autoscaling group `%s` not found", group)
 	}
 	if len(dgo.AutoScalingGroups[0].Instances) == 0 {
-		return "", fmt.Errorf("autoscaling group `%s` has no instances", group)
+		return iad, fmt.Errorf("autoscaling group `%s` has no instances", group)
 	}
 
-	iid := dgo.AutoScalingGroups[0].Instances[0].InstanceId
+	iid := []*string{}
+	for _, i := range dgo.AutoScalingGroups[0].Instances {
+		iid = append(iid, i.InstanceId)
+	}
+	isf := "instance-state-name"
+	isn := ec2.InstanceStateNameRunning
 	dii := &ec2.DescribeInstancesInput{
-		InstanceIds: []*string{iid},
+		InstanceIds: iid,
+		Filters: []*ec2.Filter{
+			&ec2.Filter{
+				Name:   &isf,
+				Values: []*string{&isn},
+			},
+		},
 	}
 	dio, err := ec2Client.DescribeInstances(dii)
 	if err != nil {
-		return "", err
+		return iad, err
 	}
-	if len(dio.Reservations) == 0 {
-		return "", fmt.Errorf("ec2 instance `%s` not found", *iid)
+	for _, i := range dio.Reservations[0].Instances {
+		iad = append(iad, *i.PrivateIpAddress)
 	}
 
-	iip := dio.Reservations[0].Instances[0].PrivateIpAddress
-	return *iip, nil
+	return iad, nil
 }
 
 type parameterOptions struct {

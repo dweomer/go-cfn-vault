@@ -34,9 +34,9 @@
   name = "github.com/eawsy/aws-lambda-go-core"
 
 [[constraint]]
-  version = "^0.9.0"
+  version = "^0.9.1"
   name = "github.com/hashicorp/vault"
 
 [[constraint]]
   name = "github.com/aws/aws-sdk-go"
-  version = "1.12.53"
+  version = "^1.12.53"

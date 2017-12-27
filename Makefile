@@ -11,7 +11,7 @@ PACKAGE ?= vault-test
 AWS_ACCOUNT_ID ?= $(shell aws sts get-caller-identity | jq -r '.Account')
 AWS_REGION ?= $(shell aws configure get region)
 
-STACK_NAME ?= Go-Vault-Resource-Test
+STACK_NAME ?= Go-Vault-Test
 STACK_BUCKET ?= $(PACKAGE)-$(AWS_ACCOUNT_ID)-$(AWS_REGION)
 
 ifeq ($(OS),Windows_NT)
@@ -67,21 +67,35 @@ clean:
 
 stack-deploy: $(PACKAGE).template
 	aws ec2 describe-key-pairs --key-names $(PACKAGE) > /dev/null 2>&1 || aws ec2 import-key-pair --key-name $(PACKAGE) --public-key-material file://$(HOME)/.ssh/id_rsa.pub
-	aws cloudformation deploy --capabilities CAPABILITY_IAM --template-file $(PACKAGE).template --stack-name $(STACK_NAME) \
-		--parameter-overrides VaultKeyPair=$(PACKAGE) AvailabilityZones=$(AWS_REGION)a,$(AWS_REGION)b,$(AWS_REGION)c
+	time aws cloudformation deploy \
+		--capabilities \
+			CAPABILITY_IAM \
+		--template-file \
+			$(PACKAGE).template \
+		--stack-name \
+			$(STACK_NAME) \
+		--parameter-overrides \
+			VaultKeyPair=$(PACKAGE) \
+			AvailabilityZones=$(AWS_REGION)a,$(AWS_REGION)b,$(AWS_REGION)c
 
 
 stack-delete:
 	aws cloudformation delete-stack --stack-name $(STACK_NAME)
-	aws cloudformation wait stack-delete-complete --stack-name $(STACK_NAME)
+	time aws cloudformation wait stack-delete-complete --stack-name $(STACK_NAME)
 
 .PHONY: stack-deploy stack-delete
 
 $(PACKAGE).template: $(PACKAGE).cfn.yaml $(PACKAGE).zip Makefile
 	aws s3 ls s3://$(STACK_BUCKET) > /dev/null 2>&1 || aws s3 mb s3://$(STACK_BUCKET)
 	aws cloudformation package \
-		--template-file $(PACKAGE).cfn.yaml --output-template-file $(PACKAGE).template \
-		--s3-bucket $(STACK_BUCKET) --s3-prefix lambda/$(PACKAGE)
+		--template-file \
+			$(PACKAGE).cfn.yaml \
+		--output-template-file \
+			$(PACKAGE).template \
+		--s3-bucket \
+			$(STACK_BUCKET) \
+		--s3-prefix \
+			lambda/$(PACKAGE)
 	aws s3 cp $(PACKAGE).template s3://$(STACK_BUCKET)/$(PACKAGE).template
 
 $(PACKAGE).zip: Makefile *.go
