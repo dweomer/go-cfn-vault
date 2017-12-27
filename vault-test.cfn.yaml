@@ -882,7 +882,7 @@ Resources: ####################################################################
           - Effect: Allow
             Action:
               - ssm:GetParameter*
-            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}'
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
           - Effect: Allow
             Action:
               - kms:Decrypt
@@ -900,7 +900,7 @@ Resources: ####################################################################
           - Effect: Allow
             Action:
               - ssm:PutParameter*
-            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}'
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
           - Effect: Allow
             Action:
               - kms:Encrypt
@@ -939,7 +939,7 @@ Resources: ####################################################################
           - Effect: Allow
             Action:
               - ssm:GetParameter*
-            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}'
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/${VaultSecretShareParameterSuffix}'
           - Effect: Allow
             Action:
               - kms:Decrypt
@@ -957,7 +957,7 @@ Resources: ####################################################################
           - Effect: Allow
             Action:
               - ssm:PutParameter*
-            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/*'
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/${VaultSecretShareParameterSuffix}'
           - Effect: Allow
             Action:
               - kms:Encrypt
@@ -1026,7 +1026,7 @@ Resources: ####################################################################
           - !Ref PrivateSubnet3
 
   VaultInit:
-    Type: Custom::VaultInit
+    Type: Custom::Init
     DependsOn:
       - VaultAutoscalingGroup
       - VaultResourceFunction
@@ -1039,7 +1039,7 @@ Resources: ####################################################################
       ServerPort: !Ref VaultPort
       ShouldUnseal: 'true'
       RootTokenEncryptionKey: !Ref VaultRootTokenEncryptionAlias
-      RootTokenParameterSuffix: !Ref VaultRootTokenParameterSuffix
+      RootTokenParameterName: !Sub '/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
       SecretShareEncryptionKey: !Ref VaultSecretShareEncryptionAlias
-      SecretShareParameterSuffix: !Ref VaultSecretShareParameterSuffix
+      SecretShareParameterName: !Sub '/${AWS::StackName}/${VaultSecretShareParameterSuffix}'
 # Resources ###################################################################

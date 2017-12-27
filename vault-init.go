@@ -20,7 +20,7 @@ import (
 )
 
 func init() {
-	customres.Register("VaultInit", new(VaultInit))
+	customres.Register("Init", new(InitResource))
 }
 
 const (
@@ -28,30 +28,30 @@ const (
 	defaultPort   = "8200"
 )
 
-// VaultInit represents `vault init` CloudFormation resource.
-type VaultInit struct {
+// InitResource represents `vault init` CloudFormation resource.
+type InitResource struct {
 	ServerScheme string `json:",omitempty"`
 	ServerGroup  string `json:",omitempty"`
 	ServerPort   string `json:",omitempty"`
 
-	RootTokenEncryptionKey   string `json:",omitempty"`
-	RootTokenParameterSuffix string `json:",omitempty"`
+	RootTokenEncryptionKey string `json:",omitempty"`
+	RootTokenParameterName string `json:",omitempty"`
 
-	SecretShareEncryptionKey   string `json:",omitempty"`
-	SecretShareParameterSuffix string `json:",omitempty"`
+	SecretShareEncryptionKey string `json:",omitempty"`
+	SecretShareParameterName string `json:",omitempty"`
 
 	ShouldUnseal string `json:",omitempty"`
 }
 
 // Create is invoked when the resource is created.
-func (r *VaultInit) Create(evt *cloudformation.Event, ctx *runtime.Context) (string, interface{}, error) {
+func (r *InitResource) Create(evt *cloudformation.Event, ctx *runtime.Context) (string, interface{}, error) {
 	rid := customres.NewPhysicalResourceID(evt)
 	evt.PhysicalResourceID = rid
 	return r.Update(evt, ctx)
 }
 
 // Update is invoked when the resource is updated.
-func (r *VaultInit) Update(evt *cloudformation.Event, ctx *runtime.Context) (string, interface{}, error) {
+func (r *InitResource) Update(evt *cloudformation.Event, ctx *runtime.Context) (string, interface{}, error) {
 	aws := session.Must(session.NewSession())
 	rid := evt.PhysicalResourceID
 
@@ -71,12 +71,18 @@ func (r *VaultInit) Update(evt *cloudformation.Event, ctx *runtime.Context) (str
 		r.ServerScheme = defaultPort
 	}
 
-	if r.RootTokenParameterSuffix == "" {
-		r.RootTokenParameterSuffix = "Vault/Token/Root"
+	stcknm := strings.Split(evt.StackID, "/")[1]
+
+	if r.RootTokenParameterName == "" {
+		r.RootTokenParameterName = fmt.Sprintf("/%s/%s", stcknm, "Vault/Token/Root")
 	}
 
-	if r.SecretShareParameterSuffix == "" {
-		r.SecretShareParameterSuffix = "Vault/Unseal/0"
+	if r.SecretShareParameterName == "" {
+		r.SecretShareParameterName = fmt.Sprintf("/%s/%s", stcknm, "Vault/Secret/Unseal-1")
+	}
+
+	if r.RootTokenParameterName == r.SecretShareParameterName {
+		return rid, nil, errors.New("RootTokenParameterName must be different than SecretShareParameterName")
 	}
 
 	vipaddr, err := listInstanceAddressesInGroup(aws, r.ServerGroup)
@@ -108,13 +114,9 @@ func (r *VaultInit) Update(evt *cloudformation.Event, ctx *runtime.Context) (str
 		return rid, nil, err
 	}
 
-	stcknm := strings.Split(evt.StackID, "/")[1]
-	ssname := fmt.Sprintf("/%s/%s", stcknm, r.SecretShareParameterSuffix)
-	rtname := fmt.Sprintf("/%s/%s", stcknm, r.RootTokenParameterSuffix)
-
 	response := map[string]string{
-		"SecretShareParameter": ssname,
-		"RootTokenParameter":   rtname,
+		"SecretShareParameter": r.SecretShareParameterName,
+		"RootTokenParameter":   r.RootTokenParameterName,
 	}
 
 	if !vhealth.Initialized {
@@ -123,29 +125,31 @@ func (r *VaultInit) Update(evt *cloudformation.Event, ctx *runtime.Context) (str
 			SecretThreshold: 1,
 		}
 
-		log.Printf("VaultInit Request: %+v", vinitreq)
+		log.Printf("Vault Init Request: %+v", vinitreq)
 		vinitres, err := vclient.Sys().Init(&vinitreq)
 		// DO NOT LOG THE RESPONSE
 		if err != nil {
-			log.Printf("VaultInit Error: %s", err)
+			log.Printf("Vault Init Error: %s", err)
 			return rid, nil, err
 		}
 
 		ssopts := &parameterOptions{
 			Description:   "Vault Unseal Key",
 			EncryptionKey: r.SecretShareEncryptionKey,
+			Overwrite:     true,
 		}
-		if _, err = ssmPutParameter(aws, ssopts, ssname, vinitres.Keys[0]); err != nil {
-			log.Printf("PutParameter Error: %s", err)
+		if _, err = ssmPutParameter(aws, ssopts, r.SecretShareParameterName, vinitres.Keys[0]); err != nil {
+			log.Printf("SSM PutParameter Error: %s", err)
 			return rid, nil, err
 		}
 
 		rtopts := &parameterOptions{
 			Description:   "Vault Root Token",
 			EncryptionKey: r.RootTokenEncryptionKey,
+			Overwrite:     true,
 		}
-		if _, err = ssmPutParameter(aws, rtopts, rtname, vinitres.RootToken); err != nil {
-			log.Printf("PutParameter Error: %s", err)
+		if _, err = ssmPutParameter(aws, rtopts, r.RootTokenParameterName, vinitres.RootToken); err != nil {
+			log.Printf("SSM PutParameter Error: %s", err)
 			return rid, nil, err
 		}
 
@@ -162,7 +166,7 @@ func (r *VaultInit) Update(evt *cloudformation.Event, ctx *runtime.Context) (str
 }
 
 // Delete is invoked when the resource is deleted.
-func (r *VaultInit) Delete(*cloudformation.Event, *runtime.Context) error {
+func (r *InitResource) Delete(*cloudformation.Event, *runtime.Context) error {
 	return nil
 }
 
