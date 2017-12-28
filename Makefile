@@ -68,15 +68,11 @@ clean:
 stack-deploy: $(PACKAGE).template
 	aws ec2 describe-key-pairs --key-names $(PACKAGE) > /dev/null 2>&1 || aws ec2 import-key-pair --key-name $(PACKAGE) --public-key-material file://$(HOME)/.ssh/id_rsa.pub
 	time aws cloudformation deploy \
-		--capabilities \
-			CAPABILITY_IAM \
-		--template-file \
-			$(PACKAGE).template \
-		--stack-name \
-			$(STACK_NAME) \
-		--parameter-overrides \
-			VaultKeyPair=$(PACKAGE) \
-			AvailabilityZones=$(AWS_REGION)a,$(AWS_REGION)b,$(AWS_REGION)c
+		--capabilities        CAPABILITY_IAM \
+		--template-file       $(PACKAGE).template \
+		--stack-name          $(STACK_NAME) \
+		--parameter-overrides VaultKeyPair=$(PACKAGE) \
+		                      AvailabilityZones=$(AWS_REGION)a,$(AWS_REGION)b,$(AWS_REGION)c
 
 
 stack-delete:
@@ -88,14 +84,10 @@ stack-delete:
 $(PACKAGE).template: $(PACKAGE).cfn.yaml $(PACKAGE).zip Makefile
 	aws s3 ls s3://$(STACK_BUCKET) > /dev/null 2>&1 || aws s3 mb s3://$(STACK_BUCKET)
 	aws cloudformation package \
-		--template-file \
-			$(PACKAGE).cfn.yaml \
-		--output-template-file \
-			$(PACKAGE).template \
-		--s3-bucket \
-			$(STACK_BUCKET) \
-		--s3-prefix \
-			lambda/$(PACKAGE)
+		--template-file         $(PACKAGE).cfn.yaml \
+		--output-template-file  $(PACKAGE).template \
+		--s3-bucket             $(STACK_BUCKET) \
+		--s3-prefix             lambda/$(PACKAGE)
 	aws s3 cp $(PACKAGE).template s3://$(STACK_BUCKET)/$(PACKAGE).template
 
 $(PACKAGE).zip: Makefile *.go

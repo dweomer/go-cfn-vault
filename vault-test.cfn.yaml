@@ -26,6 +26,7 @@ Metadata: #####################################################################
           - VaultTableReadCapacity
           - VaultTableWriteCapacity
           - VaultRootTokenParameterSuffix
+          - VaultSecretShareParameterSuffix
           - VaultTransitTokenParameterSuffix
     ParameterLabels:
       RemoteAccessCidrBlock:
@@ -37,15 +38,15 @@ Metadata: #####################################################################
       InternalDomain:
         default: 'Private Domain Name'
       VaultScheme:
-        default: 'Vault URL Scheme'
+        default: 'Service URL Scheme'
       VaultInternalName:
-        default: 'Vault Host Prefix'
+        default: 'Service Name'
       VaultPort:
-        default: 'Vault Port Number'
+        default: 'Service Port'
       VaultImage:
-        default: 'Vault Version'
+        default: 'Docker Image'
       VaultKeyPair:
-        default: 'Vault SSH Key'
+        default: 'SSH Key'
       VaultTableMaxParallel:
         default: 'Storage: max concurrent requests'
       VaultTableReadCapacity:
@@ -54,6 +55,8 @@ Metadata: #####################################################################
         default: 'Storage: max writes per second'
       VaultRootTokenParameterSuffix:
         default: 'Root Token Parameter Suffix'
+      VaultSecretShareParameterSuffix:
+        default: 'Secret Share Parameter Suffix'
       VaultTransitTokenParameterSuffix:
         default: 'Transit Token Parameter Suffix'
 # Metadata ####################################################################
@@ -133,8 +136,8 @@ Parameters: ###################################################################
 
   VaultSecretShareParameterSuffix:
     Type: String
-    Description: Vault Root Token Parameter Suffix
-    Default: 'Vault/Unseal'
+    Description: Vault Secret Share Parameter Suffix
+    Default: 'Vault/Secret/Unseal'
 
   VaultRootTokenParameterSuffix:
     Type: String
@@ -558,7 +561,7 @@ Resources: ####################################################################
               Service:
                 - !Sub 'ec2.${AWS::URLSuffix}'
 
-  VaultInstancePermissions:
+  VaultInstancePolicy:
     Type: AWS::IAM::Policy
     Properties:
       PolicyDocument:
@@ -582,7 +585,7 @@ Resources: ####################################################################
               - cloudwatch:ListMetrics
             Resource:
               - '*'
-      PolicyName: Vault-Instance-Permissions
+      PolicyName: !Ref VaultInstanceRole
       Roles:
         - !Ref VaultInstanceRole
 
@@ -720,6 +723,8 @@ Resources: ####################################################################
 
   VaultLaunchConfiguration:
     Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn:
+      - VaultInstancePolicy
     Properties:
       ImageId: !FindInMap [RancherByRegion, !Ref 'AWS::Region', AMI]
       InstanceType: t2.medium
@@ -978,7 +983,7 @@ Resources: ####################################################################
               - ec2:Describe*
               - ssm:DescribeParameters
             Resource: '*'
-      PolicyName: !Sub '${AWS::StackName}-Vault-Resource-Additional-Permissions'
+      PolicyName: !Ref VaultResourceRole
       Roles:
         - !Ref VaultResourceRole
 
@@ -996,6 +1001,7 @@ Resources: ####################################################################
               - !Sub 'lambda.${AWS::URLSuffix}'
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - !Ref VaultRootTokenParameterReaderPolicy
         - !Ref VaultRootTokenParameterWriterPolicy
         - !Ref VaultSecretShareParameterWriterPolicy
 
@@ -1007,11 +1013,15 @@ Resources: ####################################################################
       - PrivateAssociation1
       - PrivateAssociation2
       - PrivateAssociation3
+      - VaultResourcePolicy
+      - VaultResourceRole
     Properties:
       CodeUri: vault-test.zip
       Environment:
         Variables:
           'VAULT_ADDR': !Sub '${VaultScheme}://${VaultInternalName}.${InternalDomain}:${VaultPort}'
+          'VAULT_CLIENT_TIMEOUT': '55s'
+          'VAULT_MAX_RETRIES': '5'
       Handler: handler.Handle
       Role: !GetAtt VaultResourceRole.Arn
       Runtime: python2.7
@@ -1026,12 +1036,10 @@ Resources: ####################################################################
           - !Ref PrivateSubnet3
 
   VaultInit:
-    Type: Custom::Init
+    Type: Custom::VaultInit
     DependsOn:
       - VaultAutoscalingGroup
       - VaultResourceFunction
-      - VaultResourcePolicy
-      - VaultResourceRole
     Properties:
       ServiceToken: !GetAtt VaultResourceFunction.Arn
       ServerScheme: !Ref VaultScheme
@@ -1042,4 +1050,27 @@ Resources: ####################################################################
       RootTokenParameterName: !Sub '/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
       SecretShareEncryptionKey: !Ref VaultSecretShareEncryptionAlias
       SecretShareParameterName: !Sub '/${AWS::StackName}/${VaultSecretShareParameterSuffix}'
+
+  VaultAudit:
+    Type: Custom::VaultAudit
+    DependsOn:
+      - VaultInit
+    Properties:
+      ServiceToken: !GetAtt VaultResourceFunction.Arn
+      TokenParameter: !Sub '/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
+      Type: file
+      Description: /vault/logs/audit.log
+      Options:
+        file_path: /vault/logs/audit.log
+
+  VaultMountAuthToken:
+    Type: Custom::VaultMount
+    DependsOn:
+      - VaultAudit
+    Properties:
+      ServiceToken: !GetAtt VaultResourceFunction.Arn
+      TokenParameter: !Sub '/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
+      Path: auth/token
+      DefaultLeaseTTL: 720h
+      MaximumLeaseTTL: 8760h
 # Resources ###################################################################
