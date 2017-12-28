@@ -72,6 +72,7 @@ stack-deploy: $(PACKAGE).template
 		--template-file       $(PACKAGE).template \
 		--stack-name          $(STACK_NAME) \
 		--parameter-overrides VaultKeyPair=$(PACKAGE) \
+		                      VaultTransitKeyName=testing \
 		                      AvailabilityZones=$(AWS_REGION)a,$(AWS_REGION)b,$(AWS_REGION)c
 
 

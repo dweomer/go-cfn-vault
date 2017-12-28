@@ -28,6 +28,7 @@ Metadata: #####################################################################
           - VaultRootTokenParameterSuffix
           - VaultSecretShareParameterSuffix
           - VaultTransitTokenParameterSuffix
+          - VaultTransitKeyName
     ParameterLabels:
       RemoteAccessCidrBlock:
         default: 'Remote Access Address Range'
@@ -59,6 +60,8 @@ Metadata: #####################################################################
         default: 'Secret Share Parameter Suffix'
       VaultTransitTokenParameterSuffix:
         default: 'Transit Token Parameter Suffix'
+      VaultTransitKeyName:
+        default: 'Transit Managed Encryption Key'
 # Metadata ####################################################################
 
 
@@ -148,6 +151,11 @@ Parameters: ###################################################################
     Type: String
     Description: Vault Transit Token Parameter Suffix
     Default: 'Vault/Token/Transit'
+
+  VaultTransitKeyName:
+    Type: String
+    Description: Vault Transit Managed Key
+    Default: 'default'
 # Parameters ##################################################################
 
 
@@ -596,47 +604,6 @@ Resources: ####################################################################
       Roles:
         - !Ref VaultInstanceRole
 
-  VaultLoadBalancerGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      VpcId: !Ref Vpc
-      GroupDescription: Internal ELB instances attached only to a private subnet.
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-VaultLoadBalancerGroup'
-        - Key: Environment
-          Value: !Ref 'AWS::StackName'
-
-  # Allows outbound communication to Vault Servers
-  VaultLoadBalancerGroupEgress:
-    Type: AWS::EC2::SecurityGroupEgress
-    Properties:
-      GroupId: !Ref VaultLoadBalancerGroup
-      DestinationSecurityGroupId: !Ref VaultRemoteAccessGroup
-      IpProtocol: tcp
-      FromPort: '1024'
-      ToPort: '65535'
-
-  # Allows communication from Rancher servers
-  VaultLoadBalancerGroupIngress1:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref VaultLoadBalancerGroup
-      CidrIp: !GetAtt Vpc.CidrBlock
-      FromPort: !Ref VaultPort
-      ToPort: !Ref VaultPort
-      IpProtocol: tcp
-
-  # Allows communication from the remote access control plane
-  VaultLoadBalancerGroupIngress2:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref VaultLoadBalancerGroup
-      CidrIp: !Ref RemoteAccessCidrBlock
-      FromPort: !Ref VaultPort
-      ToPort: !Ref VaultPort
-      IpProtocol: tcp
-
   VaultRemoteAccessGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -655,7 +622,7 @@ Resources: ####################################################################
           IpProtocol: tcp
       SecurityGroupIngress:
         # Allows communication between the Vault Servers and the Private LB
-        - SourceSecurityGroupId: !Ref VaultLoadBalancerGroup
+        - SourceSecurityGroupId: !Ref VaultInternalLoadBalancerGroup
           IpProtocol: tcp
           FromPort: !Ref VaultPort
           ToPort: !Ref VaultPort
@@ -668,6 +635,53 @@ Resources: ####################################################################
           Value: !Sub '${AWS::StackName}-VaultRemoteAccessGroup'
         - Key: Environment
           Value: !Ref 'AWS::StackName'
+
+  VaultInternalLoadBalancerGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: Internal ELB instances attached only to a private subnet.
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VaultInternalLoadBalancerGroup'
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  # Allows outbound communication to Vault Servers
+  VaultInternalLoadBalancerGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    DependsOn:
+      - VaultInternalLoadBalancerGroup
+    Properties:
+      GroupId: !Ref VaultInternalLoadBalancerGroup
+      DestinationSecurityGroupId: !Ref VaultRemoteAccessGroup
+      IpProtocol: tcp
+      FromPort: '1024'
+      ToPort: '65535'
+
+  # Allows communication from Rancher servers
+  VaultInternalLoadBalancerGroupIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn:
+      - VaultInternalLoadBalancerGroup
+    Properties:
+      GroupId: !Ref VaultInternalLoadBalancerGroup
+      CidrIp: !GetAtt Vpc.CidrBlock
+      FromPort: !Ref VaultPort
+      ToPort: !Ref VaultPort
+      IpProtocol: tcp
+
+  # Allows communication from the remote access control plane
+  VaultInternalLoadBalancerGroupIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn:
+      - VaultInternalLoadBalancerGroup
+    Properties:
+      GroupId: !Ref VaultInternalLoadBalancerGroup
+      CidrIp: !Ref RemoteAccessCidrBlock
+      FromPort: !Ref VaultPort
+      ToPort: !Ref VaultPort
+      IpProtocol: tcp
 
   VaultInternalTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -686,10 +700,12 @@ Resources: ####################################################################
 
   VaultInternalLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - VaultInternalLoadBalancerGroup
     Properties:
       Scheme: internal
       SecurityGroups:
-        - !Ref VaultLoadBalancerGroup
+        - !Ref VaultInternalLoadBalancerGroup
       Subnets:
         - !Ref PublicSubnet1
         - !Ref PublicSubnet2
@@ -697,6 +713,10 @@ Resources: ####################################################################
 
   VaultInternalListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - VaultInternalLoadBalancer
+      - VaultInternalLoadBalancerGroup
+      - VaultInternalTargetGroup
     Properties:
       LoadBalancerArn: !Ref VaultInternalLoadBalancer
       Port: !Ref VaultPort
@@ -707,6 +727,9 @@ Resources: ####################################################################
 
   VaultInternalAlias:
     Type: AWS::Route53::RecordSetGroup
+    DependsOn:
+      - VaultInternalLoadBalancer
+      - VaultInternalLoadBalancerGroupIngress1
     Properties:
       HostedZoneId: !Ref InternalZone
       Comment: Vault alias targeted to VaultInternalLoadBalancer.
@@ -1022,6 +1045,7 @@ Resources: ####################################################################
           'VAULT_ADDR': !Sub '${VaultScheme}://${VaultInternalName}.${InternalDomain}:${VaultPort}'
           'VAULT_CLIENT_TIMEOUT': '55s'
           'VAULT_MAX_RETRIES': '5'
+          'VAULT_TOKEN_PARAMETER': !Sub '/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
       Handler: handler.Handle
       Role: !GetAtt VaultResourceRole.Arn
       Runtime: python2.7
@@ -1051,26 +1075,83 @@ Resources: ####################################################################
       SecretShareEncryptionKey: !Ref VaultSecretShareEncryptionAlias
       SecretShareParameterName: !Sub '/${AWS::StackName}/${VaultSecretShareParameterSuffix}'
 
-  VaultAudit:
+  VaultAuditFile:
     Type: Custom::VaultAudit
     DependsOn:
       - VaultInit
     Properties:
       ServiceToken: !GetAtt VaultResourceFunction.Arn
-      TokenParameter: !Sub '/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
       Type: file
       Description: /vault/logs/audit.log
       Options:
         file_path: /vault/logs/audit.log
 
-  VaultMountAuthToken:
+  VaultAuthTokenConfig:
     Type: Custom::VaultMount
     DependsOn:
-      - VaultAudit
+      - VaultInit
     Properties:
       ServiceToken: !GetAtt VaultResourceFunction.Arn
-      TokenParameter: !Sub '/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
       Path: auth/token
       DefaultLeaseTTL: 720h
       MaximumLeaseTTL: 8760h
+      TuneOnly: 'true'
+
+  VaultTransitMount:
+    Type: Custom::VaultMount
+    DependsOn:
+      - VaultInit
+    Properties:
+      ServiceToken: !GetAtt VaultResourceFunction.Arn
+      Type: transit
+      Description: encryption as a service
+
+  VaultTransitKey:
+    Type: Custom::VaultData
+    DependsOn:
+      - VaultTransitMount
+    Properties:
+      ServiceToken: !GetAtt VaultResourceFunction.Arn
+      Path: !Sub '${VaultTransitMount.Path}keys/${VaultTransitKeyName}'
+
+  VaultTransitPolicy:
+    Type: Custom::VaultPolicy
+    DependsOn:
+      - VaultTransitMount
+    Properties:
+      ServiceToken: !GetAtt VaultResourceFunction.Arn
+      Name: !Sub '${VaultTransitKeyName}-transit'
+      Rules:
+        Fn::Sub: |
+          path "${VaultTransitMount.Path}random/*" {
+            capabilities = ["create", "update"]
+          }
+
+          path "${VaultTransitMount.Path}hmac/*" {
+            capabilities = ["create", "update"]
+          }
+
+          path "${VaultTransitMount.Path}encrypt/${VaultTransitKeyName}" {
+            capabilities = ["create", "update"]
+          }
+
+          path "${VaultTransitMount.Path}decrypt/${VaultTransitKeyName}" {
+            capabilities = ["create", "update"]
+          }
+
+          path "${VaultTransitMount.Path}verify/${VaultTransitKeyName}/*" {
+            capabilities = ["create", "update", "read"]
+          }
+
+          path "${VaultTransitMount.Path}keys/*" {
+            capabilities = ["deny"]
+          }
+
+          path "sys/*" {
+            capabilities = ["deny"]
+          }
+
+          path "auth/token/*" {
+            capabilities = ["create", "read", "update", "delete", "list"]
+          }
 # Resources ###################################################################

@@ -2,11 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	customresource "github.com/eawsy/aws-cloudformation-go-customres/service/cloudformation/customres"
 	lambdaruntime "github.com/eawsy/aws-lambda-go-core/service/lambda/runtime"
@@ -23,22 +23,57 @@ const (
 )
 
 var (
-	auditDefaultType    = auditTypeFile
-	auditDefaultOptions = map[string]string{
-		"file_path": "/vault/logs/audit.log",
+	auditDefaultType        = auditTypeFile
+	auditDefaultFileOptions = map[string]string{
+		"file_path": "/var/log/vault/audit.log",
 	}
 )
 
 // VaultAuditResource represents `vault audit enable/disable` CloudFormation resource.
 type VaultAuditResource struct {
-	TokenParameter string `json:",omitempty"`
-
 	Type        string            `json:",omitempty"`
 	Path        string            `json:",omitempty"`
 	Local       string            `json:",omitempty"`
 	Options     map[string]string `json:",omitempty"`
 	Description string            `json:",omitempty"`
 	Disable     string            `json:",omitempty"`
+}
+
+func (res *VaultAuditResource) configure(evt *cloudformation.Event) (disable bool, local bool, err error) {
+	if err = json.Unmarshal(evt.ResourceProperties, res); err != nil {
+		return false, false, err
+	}
+
+	disable, err = strconv.ParseBool(res.Disable)
+	if err != nil {
+		log.Printf("failed to parse `Disable`: %v", err)
+	}
+	res.Disable = fmt.Sprint(disable)
+
+	local, err = strconv.ParseBool(res.Local)
+	if err != nil {
+		log.Printf("failed to parse `Local`: %v", err)
+	}
+	res.Local = fmt.Sprint(local)
+
+	if res.Type == "" {
+		res.Type = auditDefaultType
+	}
+
+	if res.Path == "" {
+		res.Path = res.Type
+	}
+	if !strings.HasSuffix(res.Path, "/") {
+		res.Path += "/"
+	}
+
+	if res.Type == auditTypeFile && len(res.Options) == 0 {
+		for k, v := range auditDefaultFileOptions {
+			res.Options[k] = v
+		}
+	}
+
+	return disable, local, nil
 }
 
 // Create is invoked when the resource is created.
@@ -52,54 +87,17 @@ func (res *VaultAuditResource) Create(evt *cloudformation.Event, ctx *lambdarunt
 func (res *VaultAuditResource) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
 	rid := evt.PhysicalResourceID
 
-	vconfig := vaultapi.DefaultConfig()
-	if err := vconfig.ReadEnvironment(); err != nil {
-		return rid, nil, err
-	}
-
-	vclient, err := vaultapi.NewClient(vconfig)
+	disable, local, err := res.configure(evt)
 	if err != nil {
 		return rid, nil, err
 	}
 
-	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
-		return rid, nil, err
-	}
-
-	if res.TokenParameter == "" {
-		return rid, nil, errors.New("missing required resource property `TokenParameter`")
-	}
-
-	if res.Type == "" {
-		res.Type = auditDefaultType
-	}
-
-	if res.Path == "" {
-		res.Path = res.Type
-	}
-
-	if !strings.HasSuffix(res.Path, "/") {
-		res.Path += "/"
-	}
-
-	if res.Type == auditTypeFile && len(res.Options) == 0 {
-		for k, v := range auditDefaultOptions {
-			res.Options[k] = v
-		}
-	}
-
-	token, _, err := getParameter(res.TokenParameter)
-	if err != nil {
-		return rid, nil, err
-	}
-	vclient.SetToken(token)
-
-	if disable, _ := strconv.ParseBool(res.Disable); disable {
+	if disable {
 		log.Printf("Vault Audit Disable - Path:%s", res.Path)
-		return rid, res, vclient.Sys().DisableAudit(res.Path)
+		return rid, res, vault.Sys().DisableAudit(res.Path)
 	}
 
-	audits, err := vclient.Sys().ListAudit()
+	audits, err := vault.Sys().ListAudit()
 	if err != nil {
 		return rid, nil, err
 	}
@@ -107,10 +105,10 @@ func (res *VaultAuditResource) Update(evt *cloudformation.Event, ctx *lambdarunt
 	for _, audit := range audits {
 		if audit.Path == res.Path {
 			res.Type = audit.Type
-			res.Local = fmt.Sprintf("%t", audit.Local)
+			res.Local = fmt.Sprint(audit.Local)
 			res.Options = audit.Options
 			res.Description = audit.Description
-			log.Printf("Vault Audit (Found) - Path:%s, Type:%s, Local:%s, Description:%s", res.Path, res.Type, res.Local, res.Description)
+			log.Printf("Vault Audit Exists - Path:%s, Type:%s, Local:%s, Description:%s", res.Path, res.Type, res.Local, res.Description)
 			return rid, res, nil
 		}
 	}
@@ -119,60 +117,25 @@ func (res *VaultAuditResource) Update(evt *cloudformation.Event, ctx *lambdarunt
 		Type:        res.Type,
 		Description: res.Description,
 		Options:     res.Options,
+		Local:       local,
 	}
-	opts.Local, _ = strconv.ParseBool(res.Local)
-	res.Local = fmt.Sprint(opts.Local)
+
 	log.Printf("Vault Audit Enable - Path:%s, Type:%s, Local:%s, Description:%s", res.Path, res.Type, res.Local, res.Description)
-	return rid, res, vclient.Sys().EnableAuditWithOptions(res.Path, &opts)
+	return rid, res, vault.Sys().EnableAuditWithOptions(res.Path, &opts)
 }
 
 // Delete is invoked when the resource is deleted.
 func (res *VaultAuditResource) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
-	vconfig := vaultapi.DefaultConfig()
-	if err := vconfig.ReadEnvironment(); err != nil {
-		log.Printf("skipping delete of Vault Audit backend: %v", err)
-		return nil
+	_, _, err := res.configure(evt)
+	if err == nil {
+		vault.SetMaxRetries(1)
+		vault.SetClientTimeout(30 * time.Second)
+		err = vault.Sys().DisableAudit(res.Path)
 	}
 
-	vclient, err := vaultapi.NewClient(vconfig)
 	if err != nil {
-		log.Printf("skipping delete of Vault Audit backend: %v", err)
-		return nil
+		log.Printf("skipping disablement of Vault Audit backend: %v", err)
 	}
 
-	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
-		log.Printf("skipping delete of Vault Audit backend: %v", err)
-		return nil
-	}
-
-	if res.Type == "" {
-		res.Type = auditDefaultType
-	}
-
-	if res.Path == "" {
-		res.Path = res.Type
-	}
-
-	if !strings.HasSuffix(res.Path, "/") {
-		res.Path += "/"
-	}
-
-	if res.TokenParameter == "" {
-		log.Printf("skipping delete of Vault Audit backend at `%s`: %v", res.Path, "missing property `TokenParameter`")
-	}
-
-	if res.Type == auditTypeFile && len(res.Options) == 0 {
-		for k, v := range auditDefaultOptions {
-			res.Options[k] = v
-		}
-	}
-
-	token, _, err := getParameter(res.TokenParameter)
-	if err != nil {
-		log.Printf("skipping delete of Vault Audit backend at `%s`: %v", res.Path, err)
-	}
-	vclient.SetToken(token)
-
-	log.Printf("Vault Audit Disable - Path:%s", res.Path)
-	return vclient.Sys().DisableAudit(res.Path)
+	return nil
 }
