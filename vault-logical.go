@@ -12,16 +12,20 @@ import (
 )
 
 func init() {
-	customresource.Register("VaultData", new(VaultDataResource))
+	res := new(VaultLogicalResource)
+	customresource.Register("VaultData", res)
+	customresource.Register("VaultLogical", res)
+	customresource.Register("VaultSecret", res)
+	customresource.Register("VaultPath", res)
 }
 
-// VaultDataResource represents `vault audit enable/disable` CloudFormation resource.
-type VaultDataResource struct {
+// VaultLogicalResource represents `vault audit enable/disable` CloudFormation resource.
+type VaultLogicalResource struct {
 	Path string                 `json:",omitempty"`
 	Data map[string]interface{} `json:",omitempty"`
 }
 
-func (res *VaultDataResource) configure(evt *cloudformation.Event) error {
+func (res *VaultLogicalResource) configure(evt *cloudformation.Event) error {
 	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
 		return err
 	}
@@ -34,14 +38,14 @@ func (res *VaultDataResource) configure(evt *cloudformation.Event) error {
 }
 
 // Create is invoked when the resource is created.
-func (res *VaultDataResource) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+func (res *VaultLogicalResource) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
 	rid := customresource.NewPhysicalResourceID(evt)
 	evt.PhysicalResourceID = rid
 	return res.Update(evt, ctx)
 }
 
 // Update is invoked when the resource is updated.
-func (res *VaultDataResource) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+func (res *VaultLogicalResource) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
 	rid := evt.PhysicalResourceID
 	err := res.configure(evt)
 	if err != nil {
@@ -54,7 +58,7 @@ func (res *VaultDataResource) Update(evt *cloudformation.Event, ctx *lambdarunti
 }
 
 // Delete is invoked when the resource is deleted.
-func (res *VaultDataResource) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
+func (res *VaultLogicalResource) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
 	err := res.configure(evt)
 
 	if err == nil {
@@ -65,7 +69,7 @@ func (res *VaultDataResource) Delete(evt *cloudformation.Event, ctx *lambdarunti
 	}
 
 	if err != nil {
-		log.Printf("Vault Delete - skipping `%s`: %v", res.Path, err)
+		log.Printf("Vault Data - skipping delete of `%s`: %v", res.Path, err)
 	}
 
 	return nil

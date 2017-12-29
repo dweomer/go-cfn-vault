@@ -1107,7 +1107,7 @@ Resources: ####################################################################
       Description: encryption as a service
 
   VaultTransitKey:
-    Type: Custom::VaultData
+    Type: Custom::VaultLogical
     DependsOn:
       - VaultTransitMount
     Properties:
@@ -1126,31 +1126,24 @@ Resources: ####################################################################
           path "${VaultTransitMount.Path}random/*" {
             capabilities = ["create", "update"]
           }
-
           path "${VaultTransitMount.Path}hmac/*" {
             capabilities = ["create", "update"]
           }
-
           path "${VaultTransitMount.Path}encrypt/${VaultTransitKeyName}" {
             capabilities = ["create", "update"]
           }
-
           path "${VaultTransitMount.Path}decrypt/${VaultTransitKeyName}" {
             capabilities = ["create", "update"]
           }
-
           path "${VaultTransitMount.Path}verify/${VaultTransitKeyName}/*" {
             capabilities = ["create", "update", "read"]
           }
-
           path "${VaultTransitMount.Path}keys/*" {
             capabilities = ["deny"]
           }
-
           path "sys/*" {
             capabilities = ["deny"]
           }
-
           path "auth/token/*" {
             capabilities = ["create", "read", "update", "delete", "list"]
           }
