@@ -22,6 +22,8 @@ type VaultPolicyResource struct {
 }
 
 func (res *VaultPolicyResource) configure(evt *cloudformation.Event) error {
+	readVaultTokenParameter()
+
 	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
 		return err
 	}

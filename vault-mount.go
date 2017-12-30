@@ -38,6 +38,8 @@ type VaultMountResource struct {
 }
 
 func (res *VaultMountResource) configure(evt *cloudformation.Event) (tune bool, err error) {
+	readVaultTokenParameter()
+
 	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
 		return false, err
 	}

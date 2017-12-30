@@ -688,14 +688,14 @@ Resources: ####################################################################
     Properties:
       HealthCheckIntervalSeconds: 5
       HealthCheckPath: /v1/sys/health
-      HealthCheckProtocol: HTTP
+      HealthCheckProtocol: !If [!Equals [!Ref VaultScheme, http], HTTP, HTTPS]
       HealthCheckTimeoutSeconds: 2
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 2
       Matcher:
         HttpCode: '200'
       Port: !Ref VaultPort
-      Protocol: HTTP
+      Protocol: !If [!Equals [!Ref VaultScheme, http], HTTP, HTTPS]
       VpcId: !Ref Vpc
 
   VaultInternalLoadBalancer:
@@ -882,6 +882,8 @@ Resources: ####################################################################
 
   VaultRootTokenEncryptionAlias:
     Type: AWS::KMS::Alias
+    DependsOn:
+      - VaultRootTokenEncryptionKey
     Properties:
       AliasName: !Sub 'alias/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
       TargetKeyId: !Ref VaultRootTokenEncryptionKey
@@ -939,6 +941,8 @@ Resources: ####################################################################
 
   VaultSecretShareEncryptionAlias:
     Type: AWS::KMS::Alias
+    DependsOn:
+      - VaultSecretShareEncryptionKey
     Properties:
       AliasName: !Sub 'alias/${AWS::StackName}/${VaultSecretShareParameterSuffix}'
       TargetKeyId: !Ref VaultSecretShareEncryptionKey
@@ -994,6 +998,65 @@ Resources: ####################################################################
               - kms:DescribeKey
             Resource: !GetAtt VaultSecretShareEncryptionKey.Arn
 
+  VaultTransitTokenEncryptionAlias:
+    Type: AWS::KMS::Alias
+    DependsOn:
+      - VaultTransitTokenEncryptionKey
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}/${VaultTransitTokenParameterSuffix}'
+      TargetKeyId: !Ref VaultTransitTokenEncryptionKey
+
+  VaultTransitTokenEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - kms:* # see http://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html#key-policy-default-allow-root-enable-iam
+            Resource: "*"
+
+  VaultTransitTokenParameterReaderPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DependsOn:
+      - VaultTransitTokenEncryptionKey
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/${VaultTransitTokenParameterSuffix}'
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: !GetAtt VaultTransitTokenEncryptionKey.Arn
+
+  VaultTransitTokenParameterWriterPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DependsOn:
+      - VaultTransitTokenEncryptionKey
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:PutParameter*
+            Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/${VaultTransitTokenParameterSuffix}'
+          - Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: !GetAtt VaultTransitTokenEncryptionKey.Arn
+
   VaultResourcePolicy:
     Type: AWS::IAM::Policy
     Properties:
@@ -1027,6 +1090,8 @@ Resources: ####################################################################
         - !Ref VaultRootTokenParameterReaderPolicy
         - !Ref VaultRootTokenParameterWriterPolicy
         - !Ref VaultSecretShareParameterWriterPolicy
+        - !Ref VaultTransitTokenParameterReaderPolicy
+        - !Ref VaultTransitTokenParameterWriterPolicy
 
   VaultResourceFunction:
     Type: AWS::Serverless::Function
@@ -1079,6 +1144,8 @@ Resources: ####################################################################
     Type: Custom::VaultAudit
     DependsOn:
       - VaultInit
+      - VaultInternalAlias
+      - VaultRootTokenEncryptionAlias
     Properties:
       ServiceToken: !GetAtt VaultResourceFunction.Arn
       Type: file
@@ -1090,6 +1157,8 @@ Resources: ####################################################################
     Type: Custom::VaultMount
     DependsOn:
       - VaultInit
+      - VaultInternalAlias
+      - VaultRootTokenEncryptionAlias
     Properties:
       ServiceToken: !GetAtt VaultResourceFunction.Arn
       Path: auth/token
@@ -1101,6 +1170,8 @@ Resources: ####################################################################
     Type: Custom::VaultMount
     DependsOn:
       - VaultInit
+      - VaultInternalAlias
+      - VaultRootTokenEncryptionAlias
     Properties:
       ServiceToken: !GetAtt VaultResourceFunction.Arn
       Type: transit
@@ -1147,4 +1218,17 @@ Resources: ####################################################################
           path "auth/token/*" {
             capabilities = ["create", "read", "update", "delete", "list"]
           }
+
+  VaultTransitToken:
+    Type: Custom::VaultToken
+    DependsOn:
+      - VaultTransitKey
+      - VaultTransitPolicy
+      - VaultTransitTokenEncryptionAlias
+      - VaultTransitTokenParameterReaderPolicy
+      - VaultTransitTokenParameterWriterPolicy
+    Properties:
+      ServiceToken: !GetAtt VaultResourceFunction.Arn
+      ParameterName: !Sub '/${AWS::StackName}/${VaultTransitTokenParameterSuffix}'
+      ParameterKey: !Ref VaultTransitTokenEncryptionAlias
 # Resources ###################################################################

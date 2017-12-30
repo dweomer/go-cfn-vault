@@ -26,6 +26,8 @@ type VaultLogicalResource struct {
 }
 
 func (res *VaultLogicalResource) configure(evt *cloudformation.Event) error {
+	readVaultTokenParameter()
+
 	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
 		return err
 	}
@@ -52,7 +54,7 @@ func (res *VaultLogicalResource) Update(evt *cloudformation.Event, ctx *lambdaru
 		return rid, nil, err
 	}
 
-	log.Printf("Vault Write  - `%s`", res.Path)
+	log.Printf("Vault Logical `%s`: attempting write", res.Path)
 	_, err = vault.Logical().Write(res.Path, res.Data)
 	return rid, res, err
 }
@@ -64,12 +66,12 @@ func (res *VaultLogicalResource) Delete(evt *cloudformation.Event, ctx *lambdaru
 	if err == nil {
 		vault.SetMaxRetries(1)
 		vault.SetClientTimeout(30 * time.Second)
-		log.Printf("Vault Delete  - `%s`", res.Path)
+		log.Printf("Vault Logical `%s`: attempting delete", res.Path)
 		_, err = vault.Logical().Delete(res.Path)
 	}
 
 	if err != nil {
-		log.Printf("Vault Data - skipping delete of `%s`: %v", res.Path, err)
+		log.Printf("Vault Logical `%s` - skipping delete: %v", res.Path, err)
 	}
 
 	return nil

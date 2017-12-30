@@ -29,14 +29,20 @@ func init() {
 	} else {
 		vault = vapi
 	}
+}
 
+func readVaultTokenParameter() {
 	if vtpn := os.Getenv("VAULT_TOKEN_PARAMETER"); vtpn != "" {
+		log.Printf("$VAULT_TOKEN_PARAMETER='%s', reading parameter value ...", vtpn)
 		vtpv, _, err := getParameter(vtpn)
 		if err != nil {
-			log.Printf("unable to read parameter token: %v", err)
+			log.Printf("$VAULT_TOKEN_PARAMETER='%s', unable to read parameter: %v", vtpn, err)
 		} else {
+			log.Printf("$VAULT_TOKEN_PARAMETER='%s', setting parameter value on client", vtpn)
 			vault.SetToken(vtpv)
 		}
+	} else {
+		log.Printf("$VAULT_TOKEN_PARAMETER is empty or not present")
 	}
 }
 
