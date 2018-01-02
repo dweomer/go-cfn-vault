@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Transform: AWS::Serverless-2016-10-31
+# Transform: AWS::Serverless-2016-10-31
 
 Description: Auto-scaling, auto-initializing, HA Vault
 
@@ -188,8 +188,10 @@ Outputs: ######################################################################
 # Outputs #####################################################################
 
 
-# Conditions: ###################################################################
-# # Conditions ##################################################################
+Conditions: ###################################################################
+  VaultUseTLS: !Equals [!Ref VaultScheme, https]
+
+# Conditions ##################################################################
 
 
 Mappings: #####################################################################
@@ -688,14 +690,14 @@ Resources: ####################################################################
     Properties:
       HealthCheckIntervalSeconds: 5
       HealthCheckPath: /v1/sys/health
-      HealthCheckProtocol: !If [!Equals [!Ref VaultScheme, http], HTTP, HTTPS]
+      HealthCheckProtocol: !If [VaultUseTLS, HTTPS, HTTP]
       HealthCheckTimeoutSeconds: 2
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 2
       Matcher:
         HttpCode: '200'
       Port: !Ref VaultPort
-      Protocol: !If [!Equals [!Ref VaultScheme, http], HTTP, HTTPS]
+      Protocol: !If [VaultUseTLS, HTTPS, HTTP]
       VpcId: !Ref Vpc
 
   VaultInternalLoadBalancer:
@@ -720,7 +722,13 @@ Resources: ####################################################################
     Properties:
       LoadBalancerArn: !Ref VaultInternalLoadBalancer
       Port: !Ref VaultPort
-      Protocol: HTTP
+      Protocol: !If [VaultUseTLS, HTTPS, HTTP]
+      SslPolicy: !If [VaultUseTLS, 'ELBSecurityPolicy-TLS-1-2-2017-01', !Ref 'AWS::NoValue'] 
+      Certificates:
+        Fn::If:
+          - VaultUseTLS
+          - [CertificateArn: !Ref VaultCertificateArn]
+          - !Ref 'AWS::NoValue'
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref VaultInternalTargetGroup
@@ -1094,7 +1102,7 @@ Resources: ####################################################################
         - !Ref VaultTransitTokenParameterWriterPolicy
 
   VaultResourceFunction:
-    Type: AWS::Serverless::Function
+    Type: AWS::Lambda::Function
     DependsOn:
       - RouteToInternetFromPublic
       - RouteToInternetFromPrivate1
@@ -1104,7 +1112,9 @@ Resources: ####################################################################
       - VaultResourcePolicy
       - VaultResourceRole
     Properties:
-      CodeUri: vault-test.zip
+      # CodeUri: vault-test.zip
+      Code:
+        ZipFile: s3://vault-test-394697386647-us-west-2/vault-test.zip
       Environment:
         Variables:
           'VAULT_ADDR': !Sub '${VaultScheme}://${VaultInternalName}.${InternalDomain}:${VaultPort}'
