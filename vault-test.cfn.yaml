@@ -22,9 +22,9 @@ Metadata: #####################################################################
           - VaultPort
           - VaultImage
           - VaultKeyPair
-          - VaultTableMaxParallel
-          - VaultTableReadCapacity
-          - VaultTableWriteCapacity
+          - VaultStorageMaxParallel
+          - VaultStorageReadCapacity
+          - VaultStorageWriteCapacity
           - VaultRootTokenParameterSuffix
           - VaultSecretShareParameterSuffix
           - VaultTransitTokenParameterSuffix
@@ -48,11 +48,11 @@ Metadata: #####################################################################
         default: 'Docker Image'
       VaultKeyPair:
         default: 'SSH Key'
-      VaultTableMaxParallel:
+      VaultStorageMaxParallel:
         default: 'Storage: max concurrent requests'
-      VaultTableReadCapacity:
+      VaultStorageReadCapacity:
         default: 'Storage: max reads per second'
-      VaultTableWriteCapacity:
+      VaultStorageWriteCapacity:
         default: 'Storage: max writes per second'
       VaultRootTokenParameterSuffix:
         default: 'Root Token Parameter Suffix'
@@ -81,7 +81,7 @@ Parameters: ###################################################################
     Description: >-
       List of availability zones available on the account in the target region.
       Requires 3.
-    Type: 'List<AWS::EC2::AvailabilityZone::Name>'
+    Type: List<AWS::EC2::AvailabilityZone::Name>
 
   InternalDomain:
     Description: The internal/private domain.
@@ -117,21 +117,21 @@ Parameters: ###################################################################
 
   VaultKeyPair:
     Description: The name of the EC2 keypair to install on each vault node.
-    Type: 'AWS::EC2::KeyPair::KeyName'
+    Type: AWS::EC2::KeyPair::KeyName
 
-  VaultTableMaxParallel:
+  VaultStorageMaxParallel:
     Type: String
     Description: 'https://www.vaultproject.io/docs/configuration/storage/dynamodb.html#max_parallel'
     Default: 128
     AllowedPattern: ^[0-9]*$
 
-  VaultTableReadCapacity:
+  VaultStorageReadCapacity:
     Type: String
     Description: 'https://www.vaultproject.io/docs/configuration/storage/dynamodb.html#read_capacity'
     Default: 5
     AllowedPattern: ^[0-9]*$
 
-  VaultTableWriteCapacity:
+  VaultStorageWriteCapacity:
     Type: String
     Description: 'https://www.vaultproject.io/docs/configuration/storage/dynamodb.html#write_capacity'
     Default: 5
@@ -181,10 +181,10 @@ Outputs: ######################################################################
     Value: !Sub '/${AWS::StackName}/${VaultTransitTokenParameterSuffix}'
 
   VaultSecretShareParameter:
-    Value: !GetAtt VaultInit.SecretShareParameter
+    Value: !GetAtt VaultInitialization.SecretShareParameter
 
   VaultRootTokenParameter:
-    Value: !GetAtt VaultInit.RootTokenParameter
+    Value: !GetAtt VaultInitialization.RootTokenParameter
 # Outputs #####################################################################
 
 
@@ -230,7 +230,7 @@ Mappings: #####################################################################
 
 Resources: ####################################################################
   Vpc:
-    Type: 'AWS::EC2::VPC'
+    Type: AWS::EC2::VPC
     Properties:
       EnableDnsHostnames: 'true'
       EnableDnsSupport: 'true'
@@ -244,7 +244,7 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   InternalZone:
-    Type: 'AWS::Route53::HostedZone'
+    Type: AWS::Route53::HostedZone
     Properties:
       HostedZoneConfig:
         Comment: !Sub '${AWS::StackName} ${InternalDomain}'
@@ -261,7 +261,7 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   InternetGateway:
-    Type: 'AWS::EC2::InternetGateway'
+    Type: AWS::EC2::InternetGateway
     DependsOn:
       - Vpc
     Properties:
@@ -274,7 +274,7 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   GatewayAttachment:
-    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Type: AWS::EC2::VPCGatewayAttachment
     DependsOn:
       - InternetGateway
     Properties:
@@ -282,25 +282,25 @@ Resources: ####################################################################
       InternetGatewayId: !Ref InternetGateway
 
   NatGateway1:
-    Type: 'AWS::EC2::NatGateway'
+    Type: AWS::EC2::NatGateway
     DependsOn:
-      - NatGatewayEip1
+      - NatGateway1Eip
       - PublicAssociation1
     Properties:
       AllocationId: !GetAtt 
-        - NatGatewayEip1
+        - NatGateway1Eip
         - AllocationId
       SubnetId: !Ref PublicSubnet1
 
-  NatGatewayEip1:
-    Type: 'AWS::EC2::EIP'
+  NatGateway1Eip:
+    Type: AWS::EC2::EIP
     DependsOn:
       - GatewayAttachment
     Properties:
       Domain: vpc
 
   PublicRouteTable:
-    Type: 'AWS::EC2::RouteTable'
+    Type: AWS::EC2::RouteTable
     DependsOn:
       - GatewayAttachment
     Properties:
@@ -314,7 +314,7 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   RouteToInternetFromPublic:
-    Type: 'AWS::EC2::Route'
+    Type: AWS::EC2::Route
     DependsOn:
       - GatewayAttachment
       - PublicRouteTable
@@ -324,7 +324,7 @@ Resources: ####################################################################
       RouteTableId: !Ref PublicRouteTable
 
   PublicSubnet1:
-    Type: 'AWS::EC2::Subnet'
+    Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
       AvailabilityZone: !Select 
@@ -349,7 +349,7 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   PublicSubnet2:
-    Type: 'AWS::EC2::Subnet'
+    Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
       AvailabilityZone: !Select 
@@ -374,7 +374,7 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   PublicSubnet3:
-    Type: 'AWS::EC2::Subnet'
+    Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
       AvailabilityZone: !Select 
@@ -399,7 +399,7 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   PublicAssociation1:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Type: AWS::EC2::SubnetRouteTableAssociation
     DependsOn:
       - PublicRouteTable
       - PublicSubnet1
@@ -408,7 +408,7 @@ Resources: ####################################################################
       SubnetId: !Ref PublicSubnet1
 
   PublicAssociation2:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Type: AWS::EC2::SubnetRouteTableAssociation
     DependsOn:
       - PublicRouteTable
       - PublicSubnet2
@@ -417,7 +417,7 @@ Resources: ####################################################################
       SubnetId: !Ref PublicSubnet2
 
   PublicAssociation3:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Type: AWS::EC2::SubnetRouteTableAssociation
     DependsOn:
       - PublicRouteTable
       - PublicSubnet3
@@ -425,8 +425,8 @@ Resources: ####################################################################
       RouteTableId: !Ref PublicRouteTable
       SubnetId: !Ref PublicSubnet3
 
-  PrivateRouteTable:
-    Type: 'AWS::EC2::RouteTable'
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
     DependsOn:
       - GatewayAttachment
     Properties:
@@ -450,18 +450,18 @@ Resources: ####################################################################
         - Key: Environment
           Value: !Ref 'AWS::StackName'
 
-  RouteToInternetFromPrivate1:
-    Type: 'AWS::EC2::Route'
+  RouteToInternetViaNatFromPrivate1:
+    Type: AWS::EC2::Route
     DependsOn:
       - NatGateway1
-      - PrivateRouteTable
+      - PrivateRouteTable1
     Properties:
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NatGateway1
-      RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTable1
 
   PrivateSubnet1:
-    Type: 'AWS::EC2::Subnet'
+    Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
       AvailabilityZone: !Select 
@@ -485,7 +485,7 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   PrivateSubnet2:
-    Type: 'AWS::EC2::Subnet'
+    Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
       AvailabilityZone: !Select 
@@ -509,7 +509,7 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   PrivateSubnet3:
-    Type: 'AWS::EC2::Subnet'
+    Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
       AvailabilityZone: !Select 
@@ -533,40 +533,41 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   PrivateAssociation1:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Type: AWS::EC2::SubnetRouteTableAssociation
     DependsOn:
-      - PrivateRouteTable
+      - PrivateRouteTable1
       - PrivateSubnet1
     Properties:
-      RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTable1
       SubnetId: !Ref PrivateSubnet1
 
   PrivateAssociation2:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Type: AWS::EC2::SubnetRouteTableAssociation
     DependsOn:
-      - PrivateRouteTable
+      - PrivateRouteTable1
       - PrivateSubnet2
     Properties:
-      RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTable1
       SubnetId: !Ref PrivateSubnet2
 
   PrivateAssociation3:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Type: AWS::EC2::SubnetRouteTableAssociation
     DependsOn:
-      - PrivateRouteTable
+      - PrivateRouteTable1
       - PrivateSubnet3
     Properties:
-      RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref PrivateRouteTable1
       SubnetId: !Ref PrivateSubnet3
 
   VaultInstanceRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
+        Version: '2012-10-17'
         Statement:
-          - Action:
+          - Effect: Allow
+            Action:
               - sts:AssumeRole
-            Effect: Allow
             Principal:
               Service:
                 - !Sub 'ec2.${AWS::URLSuffix}'
@@ -587,7 +588,7 @@ Resources: ####################################################################
               - dynamodb:UpdateItem
               - dynamodb:DeleteItem
               - dynamodb:BatchWriteItem
-            Resource: !GetAtt VaultStorageBackend.Arn
+            Resource: !GetAtt VaultStorageTable.Arn
           - Effect: Allow
             Action:
               - cloudwatch:PutMetricData
@@ -776,11 +777,11 @@ Resources: ####################################################################
                 content: |
                   storage "dynamodb" {
                     region = "${AWS::Region}"
-                    table = "${VaultStorageBackend}"
+                    table = "${VaultStorageTable}"
                     ha_enabled = "true"
-                    max_parallel = "${VaultTableMaxParallel}"
-                    read_capacity = "${VaultTableReadCapacity}"
-                    write_capacity = "${VaultTableWriteCapacity}"
+                    max_parallel = "${VaultStorageMaxParallel}"
+                    read_capacity = "${VaultStorageReadCapacity}"
+                    write_capacity = "${VaultStorageWriteCapacity}"
                   }
                   listener "tcp" {
                     address = "0.0.0.0:${VaultPort}"
@@ -820,7 +821,7 @@ Resources: ####################################################################
   VaultTopic:
     Type: AWS::SNS::Topic
 
-  VaultStorageBackend:
+  VaultStorageTable:
     Type: AWS::DynamoDB::Table
     Properties:
       AttributeDefinitions:
@@ -829,18 +830,18 @@ Resources: ####################################################################
         - AttributeName: 'Key'
           AttributeType: 'S'
       KeySchema:
-        - AttributeName: "Path"
-          KeyType: "HASH"
-        - AttributeName: "Key"
-          KeyType: "RANGE"
+        - AttributeName: 'Path'
+          KeyType: 'HASH'
+        - AttributeName: 'Key'
+          KeyType: 'RANGE'
       ProvisionedThroughput:
-        ReadCapacityUnits: !Ref VaultTableReadCapacity
-        WriteCapacityUnits: !Ref VaultTableWriteCapacity
+        ReadCapacityUnits: !Ref VaultStorageReadCapacity
+        WriteCapacityUnits: !Ref VaultStorageWriteCapacity
 
   VaultAutoscalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn:
-      - RouteToInternetFromPrivate1
+      - RouteToInternetViaNatFromPrivate1
       - RouteToInternetFromPublic
       - VaultInternalAlias
     CreationPolicy:
@@ -1105,7 +1106,7 @@ Resources: ####################################################################
     Type: AWS::Lambda::Function
     DependsOn:
       - RouteToInternetFromPublic
-      - RouteToInternetFromPrivate1
+      - RouteToInternetViaNatFromPrivate1
       - PrivateAssociation1
       - PrivateAssociation2
       - PrivateAssociation3
@@ -1134,7 +1135,7 @@ Resources: ####################################################################
           - !Ref PrivateSubnet2
           - !Ref PrivateSubnet3
 
-  VaultInit:
+  VaultInitialization:
     Type: Custom::VaultInit
     DependsOn:
       - VaultAutoscalingGroup
@@ -1150,10 +1151,10 @@ Resources: ####################################################################
       SecretShareEncryptionKey: !Ref VaultSecretShareEncryptionAlias
       SecretShareParameterName: !Sub '/${AWS::StackName}/${VaultSecretShareParameterSuffix}'
 
-  VaultAuditFile:
+  VaultAuditLog:
     Type: Custom::VaultAudit
     DependsOn:
-      - VaultInit
+      - VaultInitialization
       - VaultInternalAlias
       - VaultRootTokenEncryptionAlias
     Properties:
@@ -1162,11 +1163,12 @@ Resources: ####################################################################
       Description: /vault/logs/audit.log
       Options:
         file_path: /vault/logs/audit.log
+      Disable: false
 
   VaultAuthTokenConfig:
     Type: Custom::VaultMount
     DependsOn:
-      - VaultInit
+      - VaultInitialization
       - VaultInternalAlias
       - VaultRootTokenEncryptionAlias
     Properties:
@@ -1179,7 +1181,7 @@ Resources: ####################################################################
   VaultTransitMount:
     Type: Custom::VaultMount
     DependsOn:
-      - VaultInit
+      - VaultInitialization
       - VaultInternalAlias
       - VaultRootTokenEncryptionAlias
     Properties:

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	customresource "github.com/eawsy/aws-cloudformation-go-customres/service/cloudformation/customres"
@@ -12,63 +13,63 @@ import (
 )
 
 func init() {
-	customresource.Register("VaultPolicy", new(VaultPolicyResource))
+	customresource.Register("VaultPolicy", new(vaultPolicyHandler))
 }
 
-// VaultPolicyResource represents `vault audit enable/disable` CloudFormation resource.
-type VaultPolicyResource struct {
+type vaultPolicyHandler struct{}
+type vaultPolicyResource struct {
+	vaultResource `json:"-"`
+
 	Name  string `json:",omitempty"`
 	Rules string `json:",omitempty"`
 }
 
-func (res *VaultPolicyResource) configure(evt *cloudformation.Event) error {
-	readVaultTokenParameter()
+func (h *vaultPolicyHandler) resource(evt *cloudformation.Event) (string, *vaultPolicyResource, error) {
+	rid := resourceID(evt)
+	res := &vaultPolicyResource{}
 
 	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
-		return err
+		return rid, nil, err
 	}
 
 	if res.Name == "" {
-		return errors.New("missing required resource property `Name`")
+		return rid, nil, errors.New("missing required resource property `Name`")
 	}
 	if res.Rules == "" {
-		return errors.New("missing required resource property `Rules`")
+		return rid, nil, errors.New("missing required resource property `Rules`")
 	}
 
-	return nil
+	return rid, res, res.initWithTokenParameterOverride()
 }
 
 // Create is invoked when the resource is created.
-func (res *VaultPolicyResource) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
-	rid := customresource.NewPhysicalResourceID(evt)
-	evt.PhysicalResourceID = rid
-	return res.Update(evt, ctx)
+func (h *vaultPolicyHandler) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+	return h.Update(evt, ctx)
 }
 
 // Update is invoked when the resource is updated.
-func (res *VaultPolicyResource) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
-	rid := evt.PhysicalResourceID
-	err := res.configure(evt)
+func (h *vaultPolicyHandler) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+	rid, res, err := h.resource(evt)
 	if err != nil {
 		return rid, nil, err
 	}
 
-	log.Printf("Vault Policy (write) - `%s`:\n%s", res.Name, res.Rules)
-	return rid, res, vault.Sys().PutPolicy(res.Name, res.Rules)
+	log.Printf("Vault Policy `%s` - attempting %s:\n%s", res.Name, strings.ToLower(evt.RequestType), res.Rules)
+
+	return rid, res, res.client.Sys().PutPolicy(res.Name, res.Rules)
 }
 
 // Delete is invoked when the resource is deleted.
-func (res *VaultPolicyResource) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
-	err := res.configure(evt)
-
+func (h *vaultPolicyHandler) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
+	_, res, err := h.resource(evt)
 	if err == nil {
-		vault.SetMaxRetries(1)
-		vault.SetClientTimeout(30 * time.Second)
-		err = vault.Sys().DeletePolicy(res.Name)
+		res.client.SetMaxRetries(1)
+		res.client.SetClientTimeout(30 * time.Second)
+		err = res.client.Sys().DeletePolicy(res.Name)
 	}
 
 	if err != nil {
-		log.Printf("Vault Policy (delete) - skipping: %v", err)
+		log.Printf("Vault Policy `%s` - skipping delete: %v", res.Name, err)
 	}
 
 	return nil

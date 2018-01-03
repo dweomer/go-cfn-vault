@@ -15,7 +15,7 @@ import (
 )
 
 func init() {
-	customresource.Register("VaultAudit", new(VaultAuditResource))
+	customresource.Register("VaultAudit", new(vaultAuditHandler))
 }
 
 const (
@@ -29,8 +29,10 @@ var (
 	}
 )
 
-// VaultAuditResource represents `vault audit enable/disable` CloudFormation resource.
-type VaultAuditResource struct {
+type vaultAuditHandler struct{}
+type vaultAuditResource struct {
+	vaultResource `json:"-"`
+
 	Type        string            `json:",omitempty"`
 	Path        string            `json:",omitempty"`
 	Local       string            `json:",omitempty"`
@@ -39,20 +41,21 @@ type VaultAuditResource struct {
 	Disable     string            `json:",omitempty"`
 }
 
-func (res *VaultAuditResource) configure(evt *cloudformation.Event) (disable bool, local bool, err error) {
-	readVaultTokenParameter()
+func (h *vaultAuditHandler) resource(evt *cloudformation.Event) (string, *vaultAuditResource, error) {
+	rid := resourceID(evt)
+	res := &vaultAuditResource{}
 
-	if err = json.Unmarshal(evt.ResourceProperties, res); err != nil {
-		return false, false, err
+	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
+		return rid, nil, err
 	}
 
-	disable, err = strconv.ParseBool(res.Disable)
+	disable, err := strconv.ParseBool(res.Disable)
 	if err != nil {
 		log.Printf("failed to parse `Disable`: %v", err)
 	}
 	res.Disable = fmt.Sprint(disable)
 
-	local, err = strconv.ParseBool(res.Local)
+	local, err := strconv.ParseBool(res.Local)
 	if err != nil {
 		log.Printf("failed to parse `Local`: %v", err)
 	}
@@ -75,31 +78,27 @@ func (res *VaultAuditResource) configure(evt *cloudformation.Event) (disable boo
 		}
 	}
 
-	return disable, local, nil
+	return rid, res, res.initWithTokenParameterOverride()
 }
 
 // Create is invoked when the resource is created.
-func (res *VaultAuditResource) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
-	rid := customresource.NewPhysicalResourceID(evt)
-	evt.PhysicalResourceID = rid
-	return res.Update(evt, ctx)
+func (h *vaultAuditHandler) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+	return h.Update(evt, ctx)
 }
 
 // Update is invoked when the resource is updated.
-func (res *VaultAuditResource) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
-	rid := evt.PhysicalResourceID
-
-	disable, local, err := res.configure(evt)
+func (h *vaultAuditHandler) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+	rid, res, err := h.resource(evt)
 	if err != nil {
 		return rid, nil, err
 	}
 
-	if disable {
-		log.Printf("Vault Audit Disable - Path:%s", res.Path)
-		return rid, res, vault.Sys().DisableAudit(res.Path)
+	if res.Disable == "true" {
+		log.Printf("Vault Audit `%s` disable", res.Path)
+		return rid, res, res.client.Sys().DisableAudit(res.Path)
 	}
 
-	audits, err := vault.Sys().ListAudit()
+	audits, err := res.client.Sys().ListAudit()
 	if err != nil {
 		return rid, nil, err
 	}
@@ -110,7 +109,7 @@ func (res *VaultAuditResource) Update(evt *cloudformation.Event, ctx *lambdarunt
 			res.Local = fmt.Sprint(audit.Local)
 			res.Options = audit.Options
 			res.Description = audit.Description
-			log.Printf("Vault Audit Exists - Path:%s, Type:%s, Local:%s, Description:%s", res.Path, res.Type, res.Local, res.Description)
+			log.Printf("Vault Audit `%s` exists: Type:%s, Local:%s, Description:%s", res.Path, res.Type, res.Local, res.Description)
 			return rid, res, nil
 		}
 	}
@@ -119,20 +118,21 @@ func (res *VaultAuditResource) Update(evt *cloudformation.Event, ctx *lambdarunt
 		Type:        res.Type,
 		Description: res.Description,
 		Options:     res.Options,
-		Local:       local,
+		Local:       res.Local == "true",
 	}
 
-	log.Printf("Vault Audit Enable - Path:%s, Type:%s, Local:%s, Description:%s", res.Path, res.Type, res.Local, res.Description)
-	return rid, res, vault.Sys().EnableAuditWithOptions(res.Path, &opts)
+	log.Printf("Vault Audit `%s` enable: Type:%s, Local:%s, Description:%s", res.Path, res.Type, res.Local, res.Description)
+	return rid, res, res.client.Sys().EnableAuditWithOptions(res.Path, &opts)
 }
 
 // Delete is invoked when the resource is deleted.
-func (res *VaultAuditResource) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
-	_, _, err := res.configure(evt)
+func (h *vaultAuditHandler) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
+	_, res, err := h.resource(evt)
+
 	if err == nil {
-		vault.SetMaxRetries(1)
-		vault.SetClientTimeout(30 * time.Second)
-		err = vault.Sys().DisableAudit(res.Path)
+		res.client.SetMaxRetries(1)
+		res.client.SetClientTimeout(30 * time.Second)
+		err = res.client.Sys().DisableAudit(res.Path)
 	}
 
 	if err != nil {

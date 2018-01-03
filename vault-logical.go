@@ -12,62 +12,63 @@ import (
 )
 
 func init() {
-	res := new(VaultLogicalResource)
+	res := new(vaultLogicalHandler)
 	customresource.Register("VaultData", res)
 	customresource.Register("VaultLogical", res)
 	customresource.Register("VaultSecret", res)
-	customresource.Register("VaultPath", res)
 }
 
-// VaultLogicalResource represents `vault audit enable/disable` CloudFormation resource.
-type VaultLogicalResource struct {
+type vaultLogicalHandler struct{}
+type vaultLogicalResource struct {
+	vaultResource `json:"-"`
+
 	Path string                 `json:",omitempty"`
 	Data map[string]interface{} `json:",omitempty"`
 }
 
-func (res *VaultLogicalResource) configure(evt *cloudformation.Event) error {
-	readVaultTokenParameter()
+func (h *vaultLogicalHandler) resource(evt *cloudformation.Event) (string, *vaultLogicalResource, error) {
+	rid := resourceID(evt)
+	res := &vaultLogicalResource{}
 
 	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
-		return err
+		return rid, nil, err
 	}
 
 	if res.Path == "" {
-		return errors.New("missing required resource property `Path`")
+		return rid, nil, errors.New("missing required resource property `Path`")
 	}
 
-	return nil
+	return rid, res, res.initWithTokenParameterOverride()
 }
 
 // Create is invoked when the resource is created.
-func (res *VaultLogicalResource) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
-	rid := customresource.NewPhysicalResourceID(evt)
-	evt.PhysicalResourceID = rid
-	return res.Update(evt, ctx)
+func (h *vaultLogicalHandler) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+	return h.Update(evt, ctx)
 }
 
 // Update is invoked when the resource is updated.
-func (res *VaultLogicalResource) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
-	rid := evt.PhysicalResourceID
-	err := res.configure(evt)
+func (h *vaultLogicalHandler) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+	rid, res, err := h.resource(evt)
 	if err != nil {
 		return rid, nil, err
 	}
 
 	log.Printf("Vault Logical `%s`: attempting write", res.Path)
-	_, err = vault.Logical().Write(res.Path, res.Data)
+
+	_, err = res.client.Logical().Write(res.Path, res.Data)
+
 	return rid, res, err
 }
 
 // Delete is invoked when the resource is deleted.
-func (res *VaultLogicalResource) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
-	err := res.configure(evt)
+func (h *vaultLogicalHandler) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
+	_, res, err := h.resource(evt)
 
 	if err == nil {
-		vault.SetMaxRetries(1)
-		vault.SetClientTimeout(30 * time.Second)
+		res.client.SetMaxRetries(1)
+		res.client.SetClientTimeout(30 * time.Second)
 		log.Printf("Vault Logical `%s`: attempting delete", res.Path)
-		_, err = vault.Logical().Delete(res.Path)
+		_, err = res.client.Logical().Delete(res.Path)
 	}
 
 	if err != nil {

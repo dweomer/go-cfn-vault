@@ -16,7 +16,7 @@ import (
 )
 
 func init() {
-	customresource.Register("VaultInit", new(VaultInitResource))
+	customresource.Register("VaultInit", new(vaultInitHandler))
 }
 
 const (
@@ -30,8 +30,10 @@ const (
 	initDefaultSecretShareSuffix      = "Secret/Unseal"
 )
 
-// VaultInitResource represents `vault init` CloudFormation resource.
-type VaultInitResource struct {
+type vaultInitHandler struct{}
+type vaultInitResource struct {
+	vaultResource `json:"-"`
+
 	ServerScheme string `json:",omitempty"`
 	ServerGroup  string `json:",omitempty"`
 	ServerPort   string `json:",omitempty"`
@@ -45,9 +47,12 @@ type VaultInitResource struct {
 	ShouldUnseal string `json:",omitempty"`
 }
 
-func (res *VaultInitResource) configure(evt *cloudformation.Event) error {
+func (h *vaultInitHandler) resource(evt *cloudformation.Event) (string, *vaultInitResource, error) {
+	rid := resourceID(evt)
+	res := &vaultInitResource{}
+
 	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
-		return err
+		return rid, nil, err
 	}
 
 	if res.ServerScheme == "" {
@@ -55,7 +60,7 @@ func (res *VaultInitResource) configure(evt *cloudformation.Event) error {
 	}
 
 	if res.ServerGroup == "" {
-		return errors.New("missing required resource property `ServerGroup`")
+		return rid, nil, errors.New("missing required resource property `ServerGroup`")
 	}
 
 	if res.ServerPort == "" {
@@ -73,24 +78,21 @@ func (res *VaultInitResource) configure(evt *cloudformation.Event) error {
 	}
 
 	if res.RootTokenParameterName == res.SecretShareParameterName {
-		return errors.New("RootTokenParameterName must be different than SecretShareParameterName")
+		return rid, nil, errors.New("RootTokenParameterName must be different than SecretShareParameterName")
 	}
 
-	return nil
+	return rid, res, res.init()
 }
 
 // Create is invoked when the resource is created.
-func (res *VaultInitResource) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
-	rid := customresource.NewPhysicalResourceID(evt)
-	evt.PhysicalResourceID = rid
-	return res.Update(evt, ctx)
+func (h *vaultInitHandler) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+	return h.Update(evt, ctx)
 }
 
 // Update is invoked when the resource is updated.
-func (res *VaultInitResource) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
-	rid := evt.PhysicalResourceID
-
-	if err := res.configure(evt); err != nil {
+func (h *vaultInitHandler) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+	rid, res, err := h.resource(evt)
+	if err != nil {
 		return rid, nil, err
 	}
 
@@ -102,15 +104,15 @@ func (res *VaultInitResource) Update(evt *cloudformation.Event, ctx *lambdarunti
 		return rid, nil, fmt.Errorf("no suitable instances found in `%s`", res.ServerGroup)
 	}
 
-	if err := vault.SetAddress(fmt.Sprintf("%s://%s:%s", res.ServerScheme, vipaddr[0], res.ServerPort)); err != nil {
+	if err := res.client.SetAddress(fmt.Sprintf("%s://%s:%s", res.ServerScheme, vipaddr[0], res.ServerPort)); err != nil {
 		return rid, nil, err
 	}
 
-	vhealth, err := vault.Sys().Health()
+	vhealth, err := res.client.Sys().Health()
 	for i := 0; err != nil && i < 10; i++ {
 		log.Printf("sleeping prior to retry, because: %s", err)
 		time.Sleep(5 * time.Second)
-		vhealth, err = vault.Sys().Health()
+		vhealth, err = res.client.Sys().Health()
 	}
 	log.Printf("Vault Health Response: %+v", vhealth)
 	if err != nil {
@@ -129,7 +131,7 @@ func (res *VaultInitResource) Update(evt *cloudformation.Event, ctx *lambdarunti
 		}
 
 		log.Printf("Vault Init Request: %+v", vinitreq)
-		vinitres, err := vault.Sys().Init(&vinitreq)
+		vinitres, err := res.client.Sys().Init(&vinitreq)
 		// DO NOT LOG THE RESPONSE
 		if err != nil {
 			log.Printf("Vault Init Error: %s", err)
@@ -157,7 +159,7 @@ func (res *VaultInitResource) Update(evt *cloudformation.Event, ctx *lambdarunti
 		}
 
 		if shouldUnseal, err := strconv.ParseBool(res.ShouldUnseal); err == nil && shouldUnseal && vhealth.Sealed {
-			vss, err := vault.Sys().Unseal(vinitres.Keys[0])
+			vss, err := res.client.Sys().Unseal(vinitres.Keys[0])
 			if err != nil {
 				log.Printf("Vault Unseal Error: %s", err)
 			}
@@ -169,6 +171,6 @@ func (res *VaultInitResource) Update(evt *cloudformation.Event, ctx *lambdarunti
 }
 
 // Delete is invoked when the resource is deleted.
-func (res *VaultInitResource) Delete(*cloudformation.Event, *lambdaruntime.Context) error {
+func (h *vaultInitHandler) Delete(*cloudformation.Event, *lambdaruntime.Context) error {
 	return nil
 }

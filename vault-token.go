@@ -15,11 +15,13 @@ import (
 )
 
 func init() {
-	customresource.Register("VaultToken", new(VaultTokenResource))
+	customresource.Register("VaultToken", new(vaultTokenHandler))
 }
 
-// VaultTokenResource represents `vault audit enable/disable` CloudFormation resource.
-type VaultTokenResource struct {
+type vaultTokenHandler struct{}
+type vaultTokenResource struct {
+	vaultResource `json:"-"`
+
 	Role            string            `json:",omitempty"`
 	ParameterKey    string            `json:",omitempty"`
 	ParameterName   string            `json:",omitempty"`
@@ -35,15 +37,12 @@ type VaultTokenResource struct {
 	RevokeOnDelete  string            `json:",omitempty"`
 }
 
-const (
-	tokenParameterInfix = "Vault/Token"
-)
-
-func (res *VaultTokenResource) configure(evt *cloudformation.Event) (noParent, noDefaultPolicy bool, renewable *bool, useLimit int, err error) {
-	readVaultTokenParameter()
+func (h *vaultTokenHandler) resource(evt *cloudformation.Event) (string, *vaultTokenResource, error) {
+	rid := resourceID(evt)
+	res := &vaultTokenResource{}
 
 	if err := json.Unmarshal(evt.ResourceProperties, res); err != nil {
-		return false, false, nil, 0, err
+		return rid, nil, err
 	}
 
 	if res.ParameterName == "" {
@@ -51,13 +50,13 @@ func (res *VaultTokenResource) configure(evt *cloudformation.Event) (noParent, n
 		res.ParameterName = fmt.Sprintf("/%s/%s/%s", stcknm, tokenParameterInfix, evt.PhysicalResourceID)
 	}
 
-	noParent, err = strconv.ParseBool(res.NoParent)
+	noParent, err := strconv.ParseBool(res.NoParent)
 	if err != nil {
 		log.Printf("failed to parse `NoParent`: %v", err)
 	}
 	res.NoParent = fmt.Sprint(noParent)
 
-	noDefaultPolicy, err = strconv.ParseBool(res.NoDefaultPolicy)
+	noDefaultPolicy, err := strconv.ParseBool(res.NoDefaultPolicy)
 	if err != nil {
 		log.Printf("failed to parse `NoDefaultPolicy`: %v", err)
 	}
@@ -66,7 +65,7 @@ func (res *VaultTokenResource) configure(evt *cloudformation.Event) (noParent, n
 	if b, err := strconv.ParseBool(res.Renewable); err != nil {
 		log.Printf("failed to parse `Renewable`: %v", err)
 	} else {
-		renewable = &b
+		renewable := &b
 		res.Renewable = fmt.Sprint(*renewable)
 	}
 
@@ -76,20 +75,68 @@ func (res *VaultTokenResource) configure(evt *cloudformation.Event) (noParent, n
 	}
 	res.RevokeOnDelete = fmt.Sprint(revokeOnDelete)
 
-	useLimit, err = strconv.Atoi(res.UseLimit)
+	useLimit, err := strconv.Atoi(res.UseLimit)
 	if err != nil {
 		log.Printf("failed to parse `UseLimit`: %v", err)
 	}
 	res.UseLimit = fmt.Sprint(useLimit)
 
-	return noParent, noDefaultPolicy, renewable, useLimit, nil
+	return rid, res, res.initWithTokenParameterOverride()
 }
 
-func (res *VaultTokenResource) doCreate(noParent, noDefaultPolicy bool, renewable *bool, useLimit int) error {
+const (
+	tokenParameterInfix = "Vault/Token"
+)
+
+// Create is invoked when the resource is created.
+func (h *vaultTokenHandler) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+	rid, res, err := h.resource(evt)
+	if err != nil {
+		return rid, nil, err
+	}
+
+	log.Printf("Vault Token `%s` - attempting to create", res.ParameterName)
+
+	return rid, res, res.doCreate()
+}
+
+// Update is invoked when the resource is updated.
+func (h *vaultTokenHandler) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
+	rid, res, err := h.resource(evt)
+	if err != nil {
+		return rid, nil, err
+	}
+
+	log.Printf("Vault Token `%s` - attempting to update (NOT IMPLEMENTED)", res.ParameterName)
+
+	return rid, res, nil
+}
+
+// Delete is invoked when the resource is deleted.
+func (h *vaultTokenHandler) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
+	_, res, err := h.resource(evt)
+	if err == nil && res.RevokeOnDelete == "true" && res.ParameterName != "" {
+		res.client.SetMaxRetries(1)
+		res.client.SetClientTimeout(30 * time.Second)
+		log.Printf("Vault Token `%s` - delete with `RevokeOnDelete`", res.ParameterName)
+		err = res.doRevoke()
+	}
+
+	if err != nil {
+		log.Printf("Vault Token `%s` - skipping delete: %v", res.ParameterName, err)
+	}
+
+	return nil
+}
+
+func (res *vaultTokenResource) doCreate() error {
 	var (
 		sec *vaultapi.Secret
 		err error
 	)
+
+	isRenewable := res.Renewable == "true"
+	useLimit, _ := strconv.ParseInt(res.UseLimit, 10, 64)
 
 	tcr := &vaultapi.TokenCreateRequest{
 		DisplayName:     res.ParameterName,
@@ -98,18 +145,18 @@ func (res *VaultTokenResource) doCreate(noParent, noDefaultPolicy bool, renewabl
 		Period:          res.Period,
 		Metadata:        res.Metadata,
 		Policies:        res.Policies,
-		NoDefaultPolicy: noDefaultPolicy,
-		NoParent:        noParent,
-		Renewable:       renewable,
-		NumUses:         useLimit,
+		NoDefaultPolicy: res.NoDefaultPolicy == "true",
+		NoParent:        res.NoParent == "true",
+		Renewable:       &isRenewable,
+		NumUses:         int(useLimit),
 	}
 
 	if res.Role != "" {
-		sec, err = vault.Auth().Token().CreateWithRole(tcr, res.Role)
-	} else if noParent {
-		sec, err = vault.Auth().Token().CreateOrphan(tcr)
+		sec, err = res.client.Auth().Token().CreateWithRole(tcr, res.Role)
+	} else if tcr.NoParent {
+		sec, err = res.client.Auth().Token().CreateOrphan(tcr)
 	} else {
-		sec, err = vault.Auth().Token().Create(tcr)
+		sec, err = res.client.Auth().Token().Create(tcr)
 	}
 
 	if err != nil {
@@ -138,70 +185,20 @@ func (res *VaultTokenResource) doCreate(noParent, noDefaultPolicy bool, renewabl
 	return nil
 }
 
-func (res *VaultTokenResource) doRenew(tcreq *vaultapi.TokenCreateRequest) error {
+func (res *vaultTokenResource) doRenew() error {
 	return fmt.Errorf("not implemented: token-renew")
 }
 
-func (res *VaultTokenResource) doRevoke(token string) error {
+func (res *vaultTokenResource) doRevoke() error {
 	if res.RevokeOnDelete != "true" {
-		return fmt.Errorf("RevokeOnDelete != true")
+		return fmt.Errorf("RevokeOnDelete is not true")
 	}
 
 	if res.NoParent == "true" {
 		log.Printf("Vault Token `%s` - attempting to revoke (orphan)", res.ParameterName)
-		return vault.Auth().Token().RevokeOrphan(token)
+		return res.client.Auth().Token().RevokeOrphan(res.ParameterName)
 	}
 
 	log.Printf("Vault Token `%s` - attempting to revoke (tree)", res.ParameterName)
-	return vault.Auth().Token().RevokeTree(token)
-}
-
-// Create is invoked when the resource is created.
-func (res *VaultTokenResource) Create(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
-	rid := customresource.NewPhysicalResourceID(evt)
-	evt.PhysicalResourceID = rid
-
-	noParent, noDefaultPolicy, renewable, useLimit, err := res.configure(evt)
-	if err != nil {
-		return rid, nil, err
-	}
-
-	log.Printf("Vault Token `%s` - attempting to create", res.ParameterName)
-	return rid, res, res.doCreate(noParent, noDefaultPolicy, renewable, useLimit)
-}
-
-// Update is invoked when the resource is updated.
-func (res *VaultTokenResource) Update(evt *cloudformation.Event, ctx *lambdaruntime.Context) (string, interface{}, error) {
-	rid := evt.PhysicalResourceID
-
-	_, _, _, _, err := res.configure(evt)
-	if err != nil {
-		return rid, nil, err
-	}
-
-	log.Printf("Vault Token `%s` - attempting to update (NOT IMPLEMENTED)", res.ParameterName)
-
-	return rid, res, err
-}
-
-// Delete is invoked when the resource is deleted.
-func (res *VaultTokenResource) Delete(evt *cloudformation.Event, ctx *lambdaruntime.Context) error {
-	var token string
-	_, _, _, _, err := res.configure(evt)
-	if err == nil && res.RevokeOnDelete == "true" {
-		token, _, err = getParameter(res.ParameterName)
-	}
-
-	if err == nil && token != "" {
-		vault.SetMaxRetries(1)
-		vault.SetClientTimeout(30 * time.Second)
-		log.Printf("Vault Token `%s` - delete with `RevokeOnDelete`", res.ParameterName)
-		res.doRevoke(token)
-	}
-
-	if err != nil {
-		log.Printf("Vault Token `%s` - skipping %s: %v", res.ParameterName, strings.ToLower(evt.RequestType), err)
-	}
-
-	return nil
+	return res.client.Auth().Token().RevokeTree(res.ParameterName)
 }
