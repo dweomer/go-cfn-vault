@@ -1,6 +1,4 @@
 AWSTemplateFormatVersion: '2010-09-09'
-# Transform: AWS::Serverless-2016-10-31
-
 Description: Auto-scaling, auto-initializing, HA Vault
 
 
@@ -21,14 +19,19 @@ Metadata: #####################################################################
           - VaultInternalName
           - VaultPort
           - VaultImage
+          - VaultDockerEngine
           - VaultKeyPair
           - VaultStorageMaxParallel
           - VaultStorageReadCapacity
           - VaultStorageWriteCapacity
+          - VaultAutoscalingTimeoutInMinutes
           - VaultRootTokenParameterSuffix
           - VaultSecretShareParameterSuffix
           - VaultTransitTokenParameterSuffix
           - VaultTransitKeyName
+          - VaultCertificateArn
+          - VaultPkiBucket
+          - VaultPackageBucket
     ParameterLabels:
       RemoteAccessCidrBlock:
         default: 'Remote Access Address Range'
@@ -44,6 +47,8 @@ Metadata: #####################################################################
         default: 'Service Name'
       VaultPort:
         default: 'Service Port'
+      VaultDockerEngine:
+        default: 'Docker Engine'
       VaultImage:
         default: 'Docker Image'
       VaultKeyPair:
@@ -54,6 +59,8 @@ Metadata: #####################################################################
         default: 'Storage: max reads per second'
       VaultStorageWriteCapacity:
         default: 'Storage: max writes per second'
+      VaultAutoscalingTimeoutInMinutes:
+        default: 'Autoscaling Timeout'
       VaultRootTokenParameterSuffix:
         default: 'Root Token Parameter Suffix'
       VaultSecretShareParameterSuffix:
@@ -62,10 +69,20 @@ Metadata: #####################################################################
         default: 'Transit Token Parameter Suffix'
       VaultTransitKeyName:
         default: 'Transit Managed Encryption Key'
+      VaultCertificateArn:
+        default: 'Vault Service Certificate ARN in ACM or IAM'
+      VaultPkiBucket:
+        default: 'PKI Private Bucket'
+      VaultPackageBucket:
+        default: 'Vault Custom Resource(s) Code Bucket'
 # Metadata ####################################################################
 
 
 Parameters: ###################################################################
+  RemoteAccessCidrBlock:
+    Type: String
+    Default: 0.0.0.0/0
+
   PlatformNumber:
     Description: >-
       The second octet of your new VPC /16 network. These should be unique
@@ -88,14 +105,10 @@ Parameters: ###################################################################
     Type: String
     Default: internal
 
-  RemoteAccessCidrBlock:
-    Type: String
-    Default: 0.0.0.0/0
-
   VaultScheme:
     Description: HTTP or HTTPS?
     Type: String
-    Default: 'http'
+    Default: 'https'
     AllowedValues:
       - http
       - https
@@ -109,6 +122,11 @@ Parameters: ###################################################################
     Description: The port to send vault api requests to.
     Type: String
     Default: '8200'
+
+  VaultDockerEngine:
+    Type: String
+    Description: 'Docker Engine to use for Vault instances. See https://github.com/rancher/os-services/tree/master/d'
+    Default: 'docker-17.06.2-ce'
 
   VaultImage:
     Type: String
@@ -137,6 +155,22 @@ Parameters: ###################################################################
     Default: 5
     AllowedPattern: ^[0-9]*$
 
+  VaultAutoscalingTimeoutInMinutes:
+    Type: String
+    Description: Number of minutes to wait for all autoscaling instances to report in during create/update
+    Default: '10'
+    AllowedValues:
+      - '1'
+      - '2'
+      - '3'
+      - '4'
+      - '5'
+      - '6'
+      - '7'
+      - '8'
+      - '9'
+      - '10'
+
   VaultSecretShareParameterSuffix:
     Type: String
     Description: Vault Secret Share Parameter Suffix
@@ -156,6 +190,18 @@ Parameters: ###################################################################
     Type: String
     Description: Vault Transit Managed Key
     Default: 'default'
+
+  VaultCertificateArn:
+    Type: String
+    Description: Vault Service Certificate ARN in ACM or IAM
+
+  VaultPkiBucket:
+    Description: The Bucket Name that houses our service private keys, certificates, and CA bundle(s).
+    Type: String
+
+  VaultPackageBucket:
+    Description: Custom Resource(s) Code Bucket
+    Type: String
 # Parameters ##################################################################
 
 
@@ -170,61 +216,110 @@ Outputs: ######################################################################
     Description: The Vault URL
     Value: !Sub '${VaultScheme}://${VaultInternalName}.${InternalDomain}:${VaultPort}'
 
-  VaultLoadBalancerDnsName:
+  VaultInternalLoadBalancerDnsName:
     Description: The FQDN of the internal Vault load-balancer
     Value: !GetAtt
       - VaultInternalLoadBalancer
       - DNSName
 
-  VaultTransitTokenParameter:
-    Description: Parameter name of the Vault Transit Token
-    Value: !Sub '/${AWS::StackName}/${VaultTransitTokenParameterSuffix}'
+  VaultRootTokenParameter:
+    Description: Parameter name of the Vault Root Token
+    Value: !GetAtt VaultInitialization.RootTokenParameterName
 
   VaultSecretShareParameter:
-    Value: !GetAtt VaultInitialization.SecretShareParameter
+    Description: Parameter name of the Vault Unseal Key
+    Value: !GetAtt VaultInitialization.SecretShareParameterName
 
-  VaultRootTokenParameter:
-    Value: !GetAtt VaultInitialization.RootTokenParameter
+  VaultTransitTokenParameter:
+    Description: Parameter name of the Vault Transit Token
+    Value: !GetAtt VaultTransitToken.ParameterName
 # Outputs #####################################################################
 
 
 Conditions: ###################################################################
   VaultUseTLS: !Equals [!Ref VaultScheme, https]
-
 # Conditions ##################################################################
 
 
 Mappings: #####################################################################
-  RancherByRegion:
-    #Rancher v1.1.0 AMI's
-    ap-south-1:
-      AMI: ami-7145011e
-    eu-west-2:
-      AMI: ami-2dc0d049
-    eu-west-1:
-      AMI: ami-6b2cd712
-    ap-northeast-2:
-      AMI: ami-c2568eac
-    ap-northeast-1:
-      AMI: ami-14d72f72
-    sa-east-1:
-      AMI: ami-88087be4
-    ca-central-1:
-      AMI: ami-0f3a846b
-    ap-southeast-1:
-      AMI: ami-4866042b
-    ap-southeast-2:
-      AMI: ami-74aeb417
-    eu-central-1:
-      AMI: ami-1c339973
+
+  RegionalConfig:
+  # RancherAMI: https://github.com/rancher/os#amazon
+  # ELBAccountId: https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-access-logs.html#access-logging-bucket-permissions
     us-east-1:
-      AMI: ami-22cec059
+      RancherAMI: ami-4584ec3f
+      ELBAccountId: '127311923021'
     us-east-2:
-      AMI: ami-efd4f78a
+      RancherAMI: ami-4695bc23
+      ELBAccountId: '033677994240'
     us-west-1:
-      AMI: ami-964175f6
+      RancherAMI: ami-d24e4ab2
+      ELBAccountId: '027434742980'
     us-west-2:
-      AMI: ami-9515feed
+      RancherAMI: ami-99cb6de1
+      ELBAccountId: '797873946194'
+    ca-central-1:
+      RancherAMI: ami-1cdd6778
+      ELBAccountId: '985666609251'
+    eu-central-1:
+      RancherAMI: ami-b632bad9
+      ELBAccountId: '054676820928'
+    eu-west-1:
+      RancherAMI: ami-c5b134bc
+      ELBAccountId: '156460612806'
+    eu-west-2:
+      RancherAMI: ami-82a5bbe6
+      ELBAccountId: '652711504416'
+    ap-northeast-1:
+      RancherAMI: ami-ece6648a
+      ELBAccountId: '582318560864'
+    ap-northeast-2:
+      RancherAMI: ami-6c54f202
+      ELBAccountId: '600734575887'
+    ap-southeast-1:
+      RancherAMI: ami-f4e58488
+      ELBAccountId: '114774131450'
+    ap-southeast-2:
+      RancherAMI: ami-1544b377
+      ELBAccountId: '783225319266'
+    ap-south-1:
+      RancherAMI: ami-97ade5f8
+      ELBAccountId: '718504428378'
+    sa-east-1:
+      RancherAMI: ami-0750166b
+      ELBAccountId: '507241528517'
+
+  MinutesToISO8601Duration:
+    '1':
+      Duration: PT1M
+    '2':
+      Duration: PT2M
+    '3':
+      Duration: PT3M
+    '4':
+      Duration: PT4M
+    '5':
+      Duration: PT5M
+    '6':
+      Duration: PT6M
+    '7':
+      Duration: PT7M
+    '8':
+      Duration: PT8M
+    '9':
+      Duration: PT9M
+    '10':
+      Duration: PT10M
+    '11':
+      Duration: PT11M
+    '12':
+      Duration: PT12M
+    '13':
+      Duration: PT13M
+    '14':
+      Duration: PT14M
+    '15':
+      Duration: PT15M
 # Mappings ####################################################################
 
 
@@ -261,6 +356,7 @@ Resources: ####################################################################
           Value: !Ref 'AWS::StackName'
 
   InternetGateway:
+    DependsOn: Vpc
     Type: AWS::EC2::InternetGateway
     DependsOn:
       - Vpc
@@ -313,118 +409,6 @@ Resources: ####################################################################
         - Key: Environment
           Value: !Ref 'AWS::StackName'
 
-  RouteToInternetFromPublic:
-    Type: AWS::EC2::Route
-    DependsOn:
-      - GatewayAttachment
-      - PublicRouteTable
-    Properties:
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
-      RouteTableId: !Ref PublicRouteTable
-
-  PublicSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select 
-        - '0'
-        - !Ref AvailabilityZones
-      CidrBlock: !Sub '10.${PlatformNumber}.160.0/20'
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-PublicSubnet1'
-        - Key: Network
-          Value: !Sub '10.${PlatformNumber}.0.0/16'
-        - Key: PeerRange
-          Value: !Sub '10.${PlatformNumber}.160.0 through 10.${PlatformNumber}.255.255'
-        - Key: CIDR
-          Value: !Sub '10.${PlatformNumber}.160.0/20'
-        - Key: AvailabilityZone
-          Value: !Select 
-            - '0'
-            - !Ref AvailabilityZones
-        - Key: Environment
-          Value: !Ref 'AWS::StackName'
-
-  PublicSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select 
-        - '1'
-        - !Ref AvailabilityZones
-      CidrBlock: !Sub '10.${PlatformNumber}.176.0/20'
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-PublicSubnet2'
-        - Key: Network
-          Value: !Sub '10.${PlatformNumber}.0.0/16'
-        - Key: PeerRange
-          Value: !Sub '10.${PlatformNumber}.160.0 through 10.${PlatformNumber}.255.255'
-        - Key: CIDR
-          Value: !Sub '10.${PlatformNumber}.176.0/20'
-        - Key: AvailabilityZone
-          Value: !Select 
-            - '1'
-            - !Ref AvailabilityZones
-        - Key: Environment
-          Value: !Ref 'AWS::StackName'
-
-  PublicSubnet3:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select 
-        - '2'
-        - !Ref AvailabilityZones
-      CidrBlock: !Sub '10.${PlatformNumber}.192.0/20'
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-PublicSubnet3'
-        - Key: Network
-          Value: !Sub '10.${PlatformNumber}.0.0/16'
-        - Key: PeerRange
-          Value: !Sub '10.${PlatformNumber}.160.0 through 10.${PlatformNumber}.255.255'
-        - Key: CIDR
-          Value: !Sub '10.${PlatformNumber}.192.0/20'
-        - Key: AvailabilityZone
-          Value: !Select 
-            - '2'
-            - !Ref AvailabilityZones
-        - Key: Environment
-          Value: !Ref 'AWS::StackName'
-
-  PublicAssociation1:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    DependsOn:
-      - PublicRouteTable
-      - PublicSubnet1
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnet1
-
-  PublicAssociation2:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    DependsOn:
-      - PublicRouteTable
-      - PublicSubnet2
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnet2
-
-  PublicAssociation3:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    DependsOn:
-      - PublicRouteTable
-      - PublicSubnet3
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnet3
-
   PrivateRouteTable1:
     Type: AWS::EC2::RouteTable
     DependsOn:
@@ -449,6 +433,16 @@ Resources: ####################################################################
           Value: !Sub '10.${PlatformNumber}.0.0/16'
         - Key: Environment
           Value: !Ref 'AWS::StackName'
+
+  RouteToInternetFromPublic:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - GatewayAttachment
+      - PublicRouteTable
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
 
   RouteToInternetViaNatFromPrivate1:
     Type: AWS::EC2::Route
@@ -559,6 +553,108 @@ Resources: ####################################################################
       RouteTableId: !Ref PrivateRouteTable1
       SubnetId: !Ref PrivateSubnet3
 
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select 
+        - '0'
+        - !Ref AvailabilityZones
+      CidrBlock: !Sub '10.${PlatformNumber}.160.0/20'
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicSubnet1'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: PeerRange
+          Value: !Sub '10.${PlatformNumber}.160.0 through 10.${PlatformNumber}.255.255'
+        - Key: CIDR
+          Value: !Sub '10.${PlatformNumber}.160.0/20'
+        - Key: AvailabilityZone
+          Value: !Select 
+            - '0'
+            - !Ref AvailabilityZones
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select 
+        - '1'
+        - !Ref AvailabilityZones
+      CidrBlock: !Sub '10.${PlatformNumber}.176.0/20'
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicSubnet2'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: PeerRange
+          Value: !Sub '10.${PlatformNumber}.160.0 through 10.${PlatformNumber}.255.255'
+        - Key: CIDR
+          Value: !Sub '10.${PlatformNumber}.176.0/20'
+        - Key: AvailabilityZone
+          Value: !Select 
+            - '1'
+            - !Ref AvailabilityZones
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select 
+        - '2'
+        - !Ref AvailabilityZones
+      CidrBlock: !Sub '10.${PlatformNumber}.192.0/20'
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicSubnet3'
+        - Key: Network
+          Value: !Sub '10.${PlatformNumber}.0.0/16'
+        - Key: PeerRange
+          Value: !Sub '10.${PlatformNumber}.160.0 through 10.${PlatformNumber}.255.255'
+        - Key: CIDR
+          Value: !Sub '10.${PlatformNumber}.192.0/20'
+        - Key: AvailabilityZone
+          Value: !Select 
+            - '2'
+            - !Ref AvailabilityZones
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+
+  PublicAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - PublicRouteTable
+      - PublicSubnet1
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - PublicRouteTable
+      - PublicSubnet2
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PublicAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - PublicRouteTable
+      - PublicSubnet3
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet3
+
   VaultInstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -576,12 +672,11 @@ Resources: ####################################################################
     Type: AWS::IAM::Policy
     Properties:
       PolicyDocument:
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Action:
               - dynamodb:DescribeTable
-              - dynamodb:CreateTable
               - dynamodb:GetItem
               - dynamodb:Query
               - dynamodb:QueryPages
@@ -591,17 +686,32 @@ Resources: ####################################################################
             Resource: !GetAtt VaultStorageTable.Arn
           - Effect: Allow
             Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogStreams
+            Resource: !GetAtt 'VaultAuditLogGroup.Arn'
+          - Effect: Allow
+            Action:
               - cloudwatch:PutMetricData
               - cloudwatch:GetMetricStatistics
               - cloudwatch:ListMetrics
             Resource:
               - '*'
+          - Effect: Allow
+            Action:
+              - s3:Get*
+              - s3:List*
+              - s3:Head*
+            Resource: !Sub 'arn:aws:s3:::${VaultPkiBucket}/*'
       PolicyName: !Ref VaultInstanceRole
       Roles:
         - !Ref VaultInstanceRole
 
   VaultInstanceProfile:
     Type: AWS::IAM::InstanceProfile
+    DependsOn:
+      - VaultInstanceRole
     Properties:
       Path: /
       Roles:
@@ -734,7 +844,26 @@ Resources: ####################################################################
         - Type: forward
           TargetGroupArn: !Ref VaultInternalTargetGroup
 
-  VaultInternalAlias:
+    VaultInternalLoadBalancerAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/ApplicationELB
+      AlarmDescription: Alarm to monitor if the Vault ALB instance count drops below 1
+      ComparisonOperator: LessThanThreshold
+      Threshold: '1'
+      EvaluationPeriods: '1'
+      Period: '60'
+      MetricName: HealthyHostCount
+      Statistic: Average
+      AlarmActions:
+        - !Ref 'VaultMonitoringTopic'
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt VaultInternalTargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt VaultInternalLoadBalancer.LoadBalancerFullName
+
+VaultInternalAlias:
     Type: AWS::Route53::RecordSetGroup
     DependsOn:
       - VaultInternalLoadBalancer
@@ -753,12 +882,73 @@ Resources: ####################################################################
             - VaultInternalLoadBalancer
             - DNSName
 
+  VaultStorageTopic:
+    Type: AWS::SNS::Topic
+
+  VaultStorageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: 'Path'
+          AttributeType: 'S'
+        - AttributeName: 'Key'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'Path'
+          KeyType: 'HASH'
+        - AttributeName: 'Key'
+          KeyType: 'RANGE'
+      ProvisionedThroughput:
+        ReadCapacityUnits: !Ref VaultStorageReadCapacity
+        WriteCapacityUnits: !Ref VaultStorageWriteCapacity
+
+  VaultStorageThrottledRequestsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Sum of throttled read and write requests is over 1/min.
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Unit: Count
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 5
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Ref VaultStorageTable
+      AlarmActions:
+        - !Ref VaultStorageTopic
+      InsufficientDataActions:
+        - !Ref VaultStorageTopic
+
+  VaultStorageSystemErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Sum of 500 system errors is over 1/min.
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Unit: Count
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 5
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Ref VaultStorageTable
+      AlarmActions:
+        - !Ref VaultStorageTopic
+      InsufficientDataActions:
+        - !Ref VaultStorageTopic
+
   VaultLaunchConfiguration:
     Type: AWS::AutoScaling::LaunchConfiguration
     DependsOn:
+      - VaultAuditLogGroup
       - VaultInstancePolicy
     Properties:
-      ImageId: !FindInMap [RancherByRegion, !Ref 'AWS::Region', AMI]
+      ImageId: !FindInMap [RegionalConfig, !Ref 'AWS::Region', RancherAMI]
       InstanceType: t2.medium
       SecurityGroups:
         - !Ref VaultRemoteAccessGroup
@@ -783,19 +973,54 @@ Resources: ####################################################################
                     read_capacity = "${VaultStorageReadCapacity}"
                     write_capacity = "${VaultStorageWriteCapacity}"
                   }
+
                   listener "tcp" {
                     address = "0.0.0.0:${VaultPort}"
-                    tls_disable = 1
+
+                    tls_disable = 0
                     tls_cert_file = "/vault/config/tls/certificate.pem"
                     tls_key_file = "/vault/config/tls/private-key.pem"
                     tls_min_version = "tls12"
                     tls_prefer_server_cipher_suites = "true"
                   }
+              - path: /opt/vault/awslogs.conf
+                permissions: "0644"
+                content: |
+                  [general]
+                  state_file = /var/awslogs/state/agent-state
+
+                  [/vault/logs/audit.log]
+                  file = /vault/logs/audit.log
+                  log_group_name = ${VaultAuditLogGroup}
+                  log_stream_name = {instance_id}
+                  datetime_format = %Y-%m-%dT%H:%M:%S.%f
             runcmd:
+              - mkdir -p /opt/vault/logs
+              - chmod 775 /opt/vault/logs
               - ros config set rancher.environment.AWS_INSTANCE_ID $(wget -qO- http://169.254.169.254/latest/meta-data/instance-id)
               - ros config set rancher.environment.AWS_LOCAL_IPV4 $(wget -qO- http://169.254.169.254/latest/meta-data/local-ipv4)
             rancher:
+              docker:
+                engine: !Ref VaultDockerEngine
               services:
+                vault-tls-certificate:
+                  image: dweomer/awscli
+                  command: s3 cp s3://${VaultPkiBucket}/${VaultInternalName}.${InternalDomain}-certificate.pem /vault/config/tls/certificate.pem
+                  labels:
+                    io.rancher.os.after: network
+                    io.rancher.os.before: docker
+                    io.rancher.os.scope: system
+                  volumes:
+                    - /opt/vault/config:/vault/config
+                vault-tls-private-key:
+                  image: dweomer/awscli
+                  command: s3 cp s3://${VaultPkiBucket}/${VaultInternalName}.${InternalDomain}-private-key.pem /vault/config/tls/private-key.pem
+                  labels:
+                    io.rancher.os.after: network
+                    io.rancher.os.before: docker
+                    io.rancher.os.scope: system
+                  volumes:
+                    - /opt/vault/config:/vault/config
                 vault:
                   image: ${VaultImage}
                   hostname: ${VaultInternalName}.${InternalDomain}
@@ -810,7 +1035,16 @@ Resources: ####################################################################
                     - "${VaultPort}:${VaultPort}"
                   volumes:
                     - /opt/vault/config:/vault/config
+                    - /opt/vault/logs:/vault/logs
                   command: server
+                vault-audit-logs:
+                  image: ernestoojeda/awslogs
+                  restart: unless-stopped
+                  environment:
+                    - REGION=${AWS::Region}
+                  volumes:
+                    - /opt/vault/awslogs.conf:/awslogs.conf
+                    - /opt/vault/logs:/vault/logs
                 vault-signal-asg:
                   image: dweomer/awscfn
                   command: cfn-signal --success true --region ${AWS::Region} --stack ${AWS::StackName} --resource VaultAutoscalingGroup
@@ -818,25 +1052,8 @@ Resources: ####################################################################
                     - vault
                   restart: on-failure
 
-  VaultTopic:
+  VaultMonitoringTopic:
     Type: AWS::SNS::Topic
-
-  VaultStorageTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      AttributeDefinitions:
-        - AttributeName: 'Path'
-          AttributeType: 'S'
-        - AttributeName: 'Key'
-          AttributeType: 'S'
-      KeySchema:
-        - AttributeName: 'Path'
-          KeyType: 'HASH'
-        - AttributeName: 'Key'
-          KeyType: 'RANGE'
-      ProvisionedThroughput:
-        ReadCapacityUnits: !Ref VaultStorageReadCapacity
-        WriteCapacityUnits: !Ref VaultStorageWriteCapacity
 
   VaultAutoscalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -849,7 +1066,7 @@ Resources: ####################################################################
         MinSuccessfulInstancesPercent: 100
       ResourceSignal:
         Count: 2
-        Timeout: PT5M
+        Timeout: !FindInMap [MinutesToISO8601Duration, !Ref 'VaultAutoscalingTimeoutInMinutes', Duration]
     UpdatePolicy:
       AutoScalingReplacingUpdate:
         WillReplace: true
@@ -857,7 +1074,7 @@ Resources: ####################################################################
         MaxBatchSize: 1
         MinInstancesInService: 1
         MinSuccessfulInstancesPercent: 100
-        PauseTime: PT5M
+        PauseTime: !FindInMap [MinutesToISO8601Duration, !Ref 'VaultAutoscalingTimeoutInMinutes', Duration]
         WaitOnResourceSignals: true
     Properties:
       DesiredCapacity: 2
@@ -871,11 +1088,11 @@ Resources: ####################################################################
       MetricsCollection:
         - Granularity: 1Minute
       VPCZoneIdentifier:
-        - !Ref PublicSubnet1
-        - !Ref PublicSubnet2
-        - !Ref PublicSubnet3
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
       NotificationConfigurations:
-        - TopicARN: !Ref 'VaultTopic'
+        - TopicARN: !Ref VaultMonitoringTopic
           NotificationTypes:
             - autoscaling:EC2_INSTANCE_LAUNCH
             - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
@@ -901,7 +1118,7 @@ Resources: ####################################################################
     Type: AWS::KMS::Key
     Properties:
       KeyPolicy: 
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement: 
           - Effect: "Allow"
             Principal:
@@ -960,7 +1177,7 @@ Resources: ####################################################################
     Type: AWS::KMS::Key
     Properties:
       KeyPolicy: 
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement: 
           - Effect: "Allow"
             Principal:
@@ -1019,7 +1236,7 @@ Resources: ####################################################################
     Type: AWS::KMS::Key
     Properties:
       KeyPolicy: 
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement: 
           - Effect: "Allow"
             Principal:
@@ -1068,6 +1285,8 @@ Resources: ####################################################################
 
   VaultResourcePolicy:
     Type: AWS::IAM::Policy
+    DependsOn:
+      - VaultResourceRole
     Properties:
       PolicyDocument:
         Version: '2012-10-17'
@@ -1084,6 +1303,12 @@ Resources: ####################################################################
 
   VaultResourceRole:
     Type: AWS::IAM::Role
+    DependsOn:
+      - VaultRootTokenParameterReaderPolicy
+      - VaultRootTokenParameterWriterPolicy
+      - VaultSecretShareParameterWriterPolicy
+      - VaultTransitTokenParameterReaderPolicy
+      - VaultTransitTokenParameterWriterPolicy
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -1102,11 +1327,38 @@ Resources: ####################################################################
         - !Ref VaultTransitTokenParameterReaderPolicy
         - !Ref VaultTransitTokenParameterWriterPolicy
 
+  VaultResourceGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enables remote access from DevOps VPC
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        # Allows Rancher OS to pull vault image
+        - CidrIp: 0.0.0.0/0
+          FromPort: '80'
+          ToPort: '80'
+          IpProtocol: tcp
+        # Allows Rancher OS to pull vault image
+        - CidrIp: 0.0.0.0/0
+          FromPort: '443'
+          ToPort: '443'
+          IpProtocol: tcp
+        - CidrIp: !GetAtt Vpc.CidrBlock
+          FromPort: !Ref VaultPort
+          ToPort: !Ref VaultPort
+          IpProtocol: tcp
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VaultResourceGroup'
+        - Key: Environment
+          Value: !Ref 'AWS::StackName'
+  
   VaultResourceFunction:
     Type: AWS::Lambda::Function
     DependsOn:
       - RouteToInternetFromPublic
       - RouteToInternetViaNatFromPrivate1
+      - PublicAssociation1
       - PrivateAssociation1
       - PrivateAssociation2
       - PrivateAssociation3
@@ -1115,21 +1367,23 @@ Resources: ####################################################################
     Properties:
       # CodeUri: vault-test.zip
       Code:
-        ZipFile: s3://vault-test-394697386647-us-west-2/vault-test.zip
+        S3Bucket: !Ref VaultPackageBucket
+        S3Key: go-vault-resource.zip
       Environment:
         Variables:
-          'VAULT_ADDR': !Sub '${VaultScheme}://${VaultInternalName}.${InternalDomain}:${VaultPort}'
+          'VAULT_ADDR': !Sub '${VaultScheme}://${VaultInternalLoadBalancer.DNSName}:${VaultPort}'
           'VAULT_CLIENT_TIMEOUT': '55s'
           'VAULT_MAX_RETRIES': '5'
+          'VAULT_TLS_SERVER_NAME': !Sub '${VaultInternalName}.${InternalDomain}'
           'VAULT_TOKEN_PARAMETER': !Sub '/${AWS::StackName}/${VaultRootTokenParameterSuffix}'
+          'VAULT_SKIP_VERIFY': 1
       Handler: handler.Handle
       Role: !GetAtt VaultResourceRole.Arn
       Runtime: python2.7
       Timeout: 60 #seconds
       VpcConfig:
         SecurityGroupIds:
-          - !GetAtt Vpc.DefaultSecurityGroup
-          - !Ref VaultRemoteAccessGroup
+          - !Ref VaultResourceGroup
         SubnetIds:
           - !Ref PrivateSubnet1
           - !Ref PrivateSubnet2
@@ -1151,9 +1405,15 @@ Resources: ####################################################################
       SecretShareEncryptionKey: !Ref VaultSecretShareEncryptionAlias
       SecretShareParameterName: !Sub '/${AWS::StackName}/${VaultSecretShareParameterSuffix}'
 
-  VaultAuditLog:
+  VaultAuditLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 90
+
+  VaultAuditConfiguration:
     Type: Custom::VaultAudit
     DependsOn:
+      - VaultAuditLogGroup
       - VaultInitialization
       - VaultInternalAlias
       - VaultRootTokenEncryptionAlias
@@ -1234,6 +1494,7 @@ Resources: ####################################################################
   VaultTransitToken:
     Type: Custom::VaultToken
     DependsOn:
+      - VaultAuthTokenConfig
       - VaultTransitKey
       - VaultTransitPolicy
       - VaultTransitTokenEncryptionAlias
@@ -1241,6 +1502,9 @@ Resources: ####################################################################
       - VaultTransitTokenParameterWriterPolicy
     Properties:
       ServiceToken: !GetAtt VaultResourceFunction.Arn
+      ParameterDescription: Vault Transit Token
       ParameterName: !Sub '/${AWS::StackName}/${VaultTransitTokenParameterSuffix}'
       ParameterKey: !Ref VaultTransitTokenEncryptionAlias
+      Policies:
+        - !GetAtt VaultTransitPolicy.Name
 # Resources ###################################################################

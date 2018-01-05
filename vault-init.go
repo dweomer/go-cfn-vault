@@ -119,11 +119,6 @@ func (h *vaultInitHandler) Update(evt *cloudformation.Event, ctx *lambdaruntime.
 		return rid, nil, err
 	}
 
-	response := map[string]string{
-		"SecretShareParameter": res.SecretShareParameterName,
-		"RootTokenParameter":   res.RootTokenParameterName,
-	}
-
 	if !vhealth.Initialized {
 		vinitreq := vaultapi.InitRequest{
 			SecretShares:    1,
@@ -167,7 +162,7 @@ func (h *vaultInitHandler) Update(evt *cloudformation.Event, ctx *lambdaruntime.
 		}
 	}
 
-	return rid, response, nil
+	return rid, res, nil
 }
 
 // Delete is invoked when the resource is deleted.

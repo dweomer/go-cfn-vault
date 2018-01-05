@@ -22,19 +22,20 @@ type vaultTokenHandler struct{}
 type vaultTokenResource struct {
 	vaultResource `json:"-"`
 
-	Role            string            `json:",omitempty"`
-	ParameterKey    string            `json:",omitempty"`
-	ParameterName   string            `json:",omitempty"`
-	Policies        []string          `json:",omitempty"`
-	Metadata        map[string]string `json:",omitempty"`
-	ExplicitMaxTTL  string            `json:",omitempty"`
-	TTL             string            `json:",omitempty"`
-	Period          string            `json:",omitempty"`
-	UseLimit        string            `json:",omitempty"`
-	NoParent        string            `json:",omitempty"`
-	NoDefaultPolicy string            `json:",omitempty"`
-	Renewable       string            `json:",omitempty"`
-	RevokeOnDelete  string            `json:",omitempty"`
+	Role                 string            `json:",omitempty"`
+	ParameterKey         string            `json:",omitempty"`
+	ParameterName        string            `json:",omitempty"`
+	ParameterDescription string            `json:",omitempty"`
+	Policies             []string          `json:",omitempty"`
+	Metadata             map[string]string `json:",omitempty"`
+	ExplicitMaxTTL       string            `json:",omitempty"`
+	TTL                  string            `json:",omitempty"`
+	Period               string            `json:",omitempty"`
+	UseLimit             string            `json:",omitempty"`
+	NoParent             string            `json:",omitempty"`
+	NoDefaultPolicy      string            `json:",omitempty"`
+	Renewable            string            `json:",omitempty"`
+	RevokeOnDelete       string            `json:",omitempty"`
 }
 
 func (h *vaultTokenHandler) resource(evt *cloudformation.Event) (string, *vaultTokenResource, error) {
@@ -170,6 +171,7 @@ func (res *vaultTokenResource) doCreate() error {
 	}
 
 	tpo := &parameterOptions{
+		Description:   res.ParameterDescription,
 		EncryptionKey: res.ParameterKey,
 		Overwrite:     true,
 	}
