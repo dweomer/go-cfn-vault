@@ -173,7 +173,7 @@ func (res *vaultTokenResource) doCreate() error {
 	tpo := &parameterOptions{
 		Description:   res.ParameterDescription,
 		EncryptionKey: res.ParameterKey,
-		Overwrite:     true,
+		Overwrite:     false,
 	}
 	if _, err = putParameter(tpo, res.ParameterName, sec.Auth.ClientToken); err != nil {
 		log.Printf("SSM PutParameter Error: %s", err)

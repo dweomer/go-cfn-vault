@@ -28,6 +28,13 @@ const (
 
 	initDefaultSecretShareDescription = "Vault Unseal Key"
 	initDefaultSecretShareSuffix      = "Secret/Unseal"
+
+	initDefaultSecretShares    = 5
+	initDefaultSecretThreshold = 3
+)
+
+var (
+	errSupposedlyUnpossibleInitilizationStateMismatch = fmt.Errorf("supposedly unpossible initialization state mismatch with group")
 )
 
 type vaultInitHandler struct{}
@@ -44,7 +51,9 @@ type vaultInitResource struct {
 	SecretShareEncryptionKey string `json:",omitempty"`
 	SecretShareParameterName string `json:",omitempty"`
 
-	ShouldUnseal string `json:",omitempty"`
+	SecretShares    string `json:",omitempty"`
+	SecretThreshold string `json:",omitempty"`
+	ShouldUnseal    string `json:",omitempty"`
 }
 
 func (h *vaultInitHandler) resource(evt *cloudformation.Event) (string, *vaultInitResource, error) {
@@ -81,6 +90,23 @@ func (h *vaultInitHandler) resource(evt *cloudformation.Event) (string, *vaultIn
 		return rid, nil, errors.New("RootTokenParameterName must be different than SecretShareParameterName")
 	}
 
+	secretShares, err := strconv.Atoi(res.SecretShares)
+	if err != nil {
+		log.Printf("failed to parse `SecretShares`: %v", err)
+		secretShares = initDefaultSecretShares
+	}
+	res.SecretShares = fmt.Sprint(secretShares)
+
+	secretThreshold, err := strconv.Atoi(res.SecretThreshold)
+	if err != nil {
+		log.Printf("failed to parse `SecretThreshold`: %v", err)
+		secretThreshold = initDefaultSecretThreshold
+	}
+	if secretThreshold > secretShares {
+		secretThreshold = secretShares
+	}
+	res.SecretThreshold = fmt.Sprint(secretThreshold)
+
 	return rid, res, res.init()
 }
 
@@ -96,76 +122,148 @@ func (h *vaultInitHandler) Update(evt *cloudformation.Event, ctx *lambdaruntime.
 		return rid, nil, err
 	}
 
-	vipaddr, err := listInstanceAddressesInGroup(res.ServerGroup)
-	if err != nil {
-		return rid, nil, err
-	}
-	if len(vipaddr) == 0 {
-		return rid, nil, fmt.Errorf("no suitable instances found in `%s`", res.ServerGroup)
-	}
+	// override default retry and timeout configuration to give us more control over timing
+	res.client.SetMaxRetries(0)
+	res.client.SetClientTimeout(10 * time.Second)
 
-	if err := res.client.SetAddress(fmt.Sprintf("%s://%s:%s", res.ServerScheme, vipaddr[0], res.ServerPort)); err != nil {
-		return rid, nil, err
-	}
-
-	vhealth, err := res.client.Sys().Health()
-	for i := 0; err != nil && i < 10; i++ {
-		log.Printf("sleeping prior to retry, because: %s", err)
-		time.Sleep(5 * time.Second)
-		vhealth, err = res.client.Sys().Health()
-	}
-	log.Printf("Vault Health Response: %+v", vhealth)
+	instanceAddr, err := listInstanceAddressesInGroup(res.ServerGroup)
 	if err != nil {
 		return rid, nil, err
 	}
 
-	if !vhealth.Initialized {
-		vinitreq := vaultapi.InitRequest{
-			SecretShares:    1,
-			SecretThreshold: 1,
-		}
+	instanceCount := len(instanceAddr)
+	if instanceCount == 0 {
+		return rid, nil, fmt.Errorf("no suitable instances found in group `%s`", res.ServerGroup)
+	}
 
-		log.Printf("Vault Init Request: %+v", vinitreq)
-		vinitres, err := res.client.Sys().Init(&vinitreq)
-		// DO NOT LOG THE RESPONSE
-		if err != nil {
-			log.Printf("Vault Init Error: %s", err)
-			return rid, nil, err
-		}
+	// translate ip addresses to vault addresses
+	vaultAddr := make(map[string]string, instanceCount)
+	for _, iip := range instanceAddr {
+		vaultAddr[iip] = fmt.Sprintf("%s://%s:%s", res.ServerScheme, iip, res.ServerPort)
+	}
 
-		ssopts := &parameterOptions{
-			Description:   initDefaultSecretShareDescription,
-			EncryptionKey: res.SecretShareEncryptionKey,
-			Overwrite:     true,
-		}
-		if _, err = putParameter(ssopts, res.SecretShareParameterName, vinitres.Keys[0]); err != nil {
-			log.Printf("SSM PutParameter Error: %s", err)
-			return rid, nil, err
-		}
-
-		rtopts := &parameterOptions{
-			Description:   initDefaultRootTokenDescription,
-			EncryptionKey: res.RootTokenEncryptionKey,
-			Overwrite:     true,
-		}
-		if _, err = putParameter(rtopts, res.RootTokenParameterName, vinitres.RootToken); err != nil {
-			log.Printf("SSM PutParameter Error: %s", err)
-			return rid, nil, err
-		}
-
-		if shouldUnseal, err := strconv.ParseBool(res.ShouldUnseal); err == nil && shouldUnseal && vhealth.Sealed {
-			vss, err := res.client.Sys().Unseal(vinitres.Keys[0])
-			if err != nil {
-				log.Printf("Vault Unseal Error: %s", err)
+	for err := res.doHealth(vaultAddr); len(err) > 0; err = res.doHealth(vaultAddr) {
+		// bail on fatal error condition
+		for _, e := range err {
+			if e == errSupposedlyUnpossibleInitilizationStateMismatch {
+				return rid, nil, e
 			}
-			log.Printf("Vault Seal Status: %+v", vss)
+		}
+		// if every vault is erroring out, lets wait then retry
+		if len(err) == len(vaultAddr) {
+			time.Sleep(5 * time.Second)
+		} else { // zero out the bad apples
+			for i := range err {
+				delete(vaultAddr, i)
+			}
+			break
 		}
 	}
 
-	return rid, res, nil
+	return rid, res, res.doInitialize(vaultAddr)
 }
 
 // Delete is invoked when the resource is deleted.
 func (h *vaultInitHandler) Delete(*cloudformation.Event, *lambdaruntime.Context) error {
+	return nil
+}
+
+func (res *vaultInitResource) doHealth(group map[string]string) map[string]error {
+	errors := make(map[string]error, len(group))
+
+	var initialized *bool
+
+	for ip, addr := range group {
+		if err := res.client.SetAddress(addr); err != nil {
+			errors[ip] = err
+		} else if health, err := res.client.Sys().Health(); err != nil {
+			log.Printf("Vault Init `%s` - Health: %+v", addr, err)
+			errors[ip] = err
+		} else {
+			log.Printf("Vault Init `%s` - Health: %+v", addr, health)
+			if initialized == nil {
+				initialized = &health.Initialized
+			} else if *initialized != health.Initialized {
+				errors[ip] = errSupposedlyUnpossibleInitilizationStateMismatch
+			}
+		}
+	}
+
+	return errors
+}
+
+func (res *vaultInitResource) doInitialize(group map[string]string) error {
+	var secretShares []string
+
+	for _, addr := range group {
+		if err := res.client.SetAddress(addr); err != nil {
+			return err
+		}
+
+		health, err := res.client.Sys().Health()
+		if err != nil {
+			log.Printf("Vault Init `%s` - Health: %+v", addr, err)
+			return err
+		}
+		log.Printf("Vault Init `%s` - Health: %+v", addr, health)
+
+		if !health.Initialized && len(secretShares) > 0 {
+			return errSupposedlyUnpossibleInitilizationStateMismatch
+		}
+
+		if !health.Initialized {
+			vii := vaultapi.InitRequest{}
+			vii.SecretShares, _ = strconv.Atoi(res.SecretShares)
+			vii.SecretThreshold, _ = strconv.Atoi(res.SecretThreshold)
+
+			log.Printf("Vault Init `%s`: %+v", addr, vii)
+			vio, err := res.client.Sys().Init(&vii)
+			// DO NOT LOG THE RESPONSE
+			if err != nil {
+				log.Printf("Vault Init `%s`: %s", addr, err)
+				return err
+			}
+
+			rtopts := &parameterOptions{
+				Description:   initDefaultRootTokenDescription,
+				EncryptionKey: res.RootTokenEncryptionKey,
+				Overwrite:     false,
+			}
+			if _, err = putParameter(rtopts, res.RootTokenParameterName, vio.RootToken); err != nil {
+				log.Printf("Vault Init `%s` - Parameter: %s", addr, err)
+				return err
+			}
+
+			secretShares = vio.Keys
+
+			for i, shard := range secretShares {
+				ssopts := &parameterOptions{
+					Description:   initDefaultSecretShareDescription,
+					EncryptionKey: res.SecretShareEncryptionKey,
+					Overwrite:     false,
+				}
+				ssparm := fmt.Sprintf("%s/%d", res.SecretShareParameterName, i+1)
+				if _, err = putParameter(ssopts, ssparm, shard); err != nil {
+					log.Printf("Vault Init `%s` - Parameter: %s", addr, err)
+					return err
+				}
+			}
+		}
+
+		if res.ShouldUnseal == "true" && len(secretShares) > 0 {
+			for _, shard := range secretShares {
+				status, err := res.client.Sys().Unseal(shard)
+				if err != nil {
+					log.Printf("Vault Init `%s` - Unseal: %s", addr, err)
+				} else {
+					log.Printf("Vault Init `%s` - Unseal: %+v", addr, status)
+					if !status.Sealed {
+						break
+					}
+				}
+			}
+		}
+	}
+
 	return nil
 }
